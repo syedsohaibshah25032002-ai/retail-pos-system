@@ -5,17 +5,13 @@ import { useAuth } from '../lib/auth';
 import { PageContainer, PageHeader, Card, Button, Input, Select, Badge, Spinner, EmptyState, Modal, ConfirmDialog } from '../components/ui';
 import { useToast } from '../lib/toast';
 import { formatMoney, formatMoneyShort, formatNumber, formatDate, formatDateTime, genBarcode } from '../lib/utils';
-import {
-  Package, AlertTriangle, XCircle, Search, RefreshCw, Warehouse as WarehouseIcon,
-  ClipboardList, Calculator, Award, Barcode, Settings as SettingsIcon, FileText, DatabaseBackup,
-  Tag, Percent, Plus, Trash2, Edit2, Printer, TrendingUp, TrendingDown, Wallet,
-  Receipt, Download, Shield, ArrowUpRight,
-} from 'lucide-react';
+import { Package, AlertTriangle, XCircle, Search, RefreshCw, Warehouse as WarehouseIcon, ClipboardList, Calculator, Award, Barcode, Settings as SettingsIcon, FileText, DatabaseBackup, Tag, Percent, Plus, Trash2, CreditCard as Edit2, Printer, TrendingUp, TrendingDown, Wallet, Receipt, Download, Shield, ArrowUpRight } from 'lucide-react';
 import type { NavKey } from '../components/AppShell';
 
 /* ============================ INVENTORY ============================ */
 export function Inventory() {
   const { filters } = useApp();
+  const { profile } = useAuth();
   const { success } = useToast();
   const [rows, setRows] = useState<any[]>([]);
   const [branches, setBranches] = useState<{ id: string; name: string }[]>([]);
@@ -73,6 +69,15 @@ export function Inventory() {
   const adjust = async (row: any, delta: number) => {
     const newQty = Math.max(0, row.quantity + delta);
     await supabase.from('inventory').update({ quantity: newQty }).eq('id', row.id);
+    await supabase.from('inventory_movements').insert({
+      variant_id: row.variant_id,
+      branch_id: row.branch_id,
+      movement_type: 'adjustment',
+      quantity_change: delta,
+      quantity_after: newQty,
+      note: `Manual adjustment ${delta > 0 ? '+' : ''}${delta}`,
+      created_by: profile?.id ?? null,
+    });
     success('Stock adjusted');
     load();
   };

@@ -119,11 +119,18 @@ function ProcessReturnModal({ sale, branchId, createdBy, onClose, onDone }: { sa
     }).select().single();
     if (ret) {
       await supabase.from('sales_return_items').insert(items.map((i: any) => ({ return_id: ret.id, sale_item_id: i.id, qty: returnQty[i.id] })));
-      // restock inventory
+      // restock inventory + log movements
       for (const i of items) {
         const { data: inv } = await supabase.from('inventory').select('id,quantity').eq('branch_id', branchId).eq('variant_id', i.variant_id).maybeSingle();
-        if (inv) await supabase.from('inventory').update({ quantity: inv.quantity + returnQty[i.id] }).eq('id', inv.id);
-        else await supabase.from('inventory').insert({ branch_id: branchId, variant_id: i.variant_id, quantity: returnQty[i.id] });
+        const retQty = returnQty[i.id];
+        if (inv) {
+          const newQty = inv.quantity + retQty;
+          await supabase.from('inventory').update({ quantity: newQty }).eq('id', inv.id);
+          await supabase.from('inventory_movements').insert({ variant_id: i.variant_id, branch_id: branchId, movement_type: 'return', quantity_change: retQty, quantity_after: newQty, reference_id: ret.id, reference_type: 'sales_returns', note: `Return ${return_no}`, created_by: createdBy ?? null });
+        } else {
+          await supabase.from('inventory').insert({ branch_id: branchId, variant_id: i.variant_id, quantity: retQty });
+          await supabase.from('inventory_movements').insert({ variant_id: i.variant_id, branch_id: branchId, movement_type: 'return', quantity_change: retQty, quantity_after: retQty, reference_id: ret.id, reference_type: 'sales_returns', note: `Return ${return_no}`, created_by: createdBy ?? null });
+        }
       }
     }
     setSaving(false);

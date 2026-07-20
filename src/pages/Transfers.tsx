@@ -71,17 +71,22 @@ export function Transfers() {
   };
 
   const complete = async (t: Transfer) => {
-    // move stock: decrement from_branch, increment to_branch
+    // move stock: decrement from_branch, increment to_branch + log movements
     for (const item of t.items) {
       const { data: fromInv } = await supabase.from('inventory').select('id,quantity').eq('branch_id', t.from_branch_id).eq('variant_id', item.variant_id).maybeSingle();
       if (fromInv) {
-        await supabase.from('inventory').update({ quantity: Math.max(0, fromInv.quantity - item.qty) }).eq('id', fromInv.id);
+        const newFromQty = Math.max(0, fromInv.quantity - item.qty);
+        await supabase.from('inventory').update({ quantity: newFromQty }).eq('id', fromInv.id);
+        await supabase.from('inventory_movements').insert({ variant_id: item.variant_id, branch_id: t.from_branch_id, movement_type: 'transfer_out', quantity_change: -item.qty, quantity_after: newFromQty, reference_id: t.id, reference_type: 'stock_transfers', note: `Transfer ${t.transfer_no} out`, created_by: profile?.id ?? null });
       }
       const { data: toInv } = await supabase.from('inventory').select('id,quantity').eq('branch_id', t.to_branch_id).eq('variant_id', item.variant_id).maybeSingle();
       if (toInv) {
-        await supabase.from('inventory').update({ quantity: toInv.quantity + item.qty }).eq('id', toInv.id);
+        const newToQty = toInv.quantity + item.qty;
+        await supabase.from('inventory').update({ quantity: newToQty }).eq('id', toInv.id);
+        await supabase.from('inventory_movements').insert({ variant_id: item.variant_id, branch_id: t.to_branch_id, movement_type: 'transfer_in', quantity_change: item.qty, quantity_after: newToQty, reference_id: t.id, reference_type: 'stock_transfers', note: `Transfer ${t.transfer_no} in`, created_by: profile?.id ?? null });
       } else {
         await supabase.from('inventory').insert({ branch_id: t.to_branch_id, variant_id: item.variant_id, quantity: item.qty });
+        await supabase.from('inventory_movements').insert({ variant_id: item.variant_id, branch_id: t.to_branch_id, movement_type: 'transfer_in', quantity_change: item.qty, quantity_after: item.qty, reference_id: t.id, reference_type: 'stock_transfers', note: `Transfer ${t.transfer_no} in`, created_by: profile?.id ?? null });
       }
     }
     await supabase.from('stock_transfers').update({ status: 'completed' }).eq('id', t.id);

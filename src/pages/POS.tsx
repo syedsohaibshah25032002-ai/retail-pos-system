@@ -134,35 +134,43 @@ export function POS() {
     })();
   }, []);
 
-  // Load catalog when branch changes
-  useEffect(() => {
+  // Load catalog when branch changes — start from products, then variants, then inventory
+  // This ensures ALL active products appear even if inventory row is missing (stock=0)
+  const loadCatalog = useCallback(async () => {
     if (!branchId) return;
     setLoading(true);
-    (async () => {
+    try {
+      // 1. Fetch all active, non-deleted products
+      const { data: products } = await supabase
+        .from('products')
+        .select('id,name,color,selling_price,tax_rate,barcode,image_url,brands(name),categories(name)')
+        .eq('is_active', true)
+        .is('deleted_at', null)
+        .order('created_at', { ascending: false });
+      const prods = (products ?? []) as ProductRow[];
+      if (prods.length === 0) { setCatalog([]); setLoading(false); return; }
+      const productIds = prods.map((p) => p.id);
+      const prodMap = new Map<string, ProductRow>(prods.map((p) => [p.id, p]));
+
+      // 2. Fetch all variants for those products
+      const { data: variants } = await supabase
+        .from('product_variants')
+        .select('id,product_id,size,barcode,sku')
+        .in('product_id', productIds)
+        .order('size');
+      const vars = (variants ?? []) as { id: string; product_id: string; size: string; barcode: string | null; sku: string | null }[];
+
+      // 3. Fetch inventory for this branch only
       const { data: inv } = await supabase
         .from('inventory')
         .select('variant_id,quantity,low_stock_threshold')
         .eq('branch_id', branchId);
       const stockMap = new Map((inv ?? []).map((i) => [i.variant_id, { qty: i.quantity, low: i.low_stock_threshold }]));
-      const variantIds = [...stockMap.keys()];
-      if (variantIds.length === 0) {
-        setCatalog([]);
-        setLoading(false);
-        return;
-      }
-      const { data: variants } = await supabase
-        .from('product_variants')
-        .select('id,product_id,size,barcode,sku')
-        .in('id', variantIds);
-      const productIds = [...new Set((variants ?? []).map((v) => v.product_id))];
-      const { data: products } = await supabase
-        .from('products')
-        .select('id,name,color,selling_price,tax_rate,barcode,image_url,brands(name),categories(name)')
-        .in('id', productIds);
-      const prodMap = new Map<string, ProductRow>((products ?? []).map((p) => [p.id, p]));
-      const items: CatalogItem[] = (variants ?? []).map((v) => {
+
+      // 4. Build catalog: every variant appears, stock defaults to 0 if no inventory row
+      const items: CatalogItem[] = vars.map((v) => {
         const p = prodMap.get(v.product_id);
-        const s = stockMap.get(v.id)!;
+        const s = stockMap.get(v.id) ?? { qty: 0, low: 5 };
         return {
           variant_id: v.id,
           product_id: v.product_id,
@@ -182,9 +190,26 @@ export function POS() {
         };
       });
       setCatalog(items);
+    } catch {
+      setCatalog([]);
+    } finally {
       setLoading(false);
-    })();
+    }
   }, [branchId]);
+
+  useEffect(() => { loadCatalog(); }, [loadCatalog]);
+
+  // Realtime: auto-refresh catalog when products, variants, or inventory change
+  useEffect(() => {
+    if (!branchId) return;
+    const ch = supabase
+      .channel('pos-catalog-updates')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => loadCatalog())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'product_variants' }, () => loadCatalog())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'inventory', filter: `branch_id=eq.${branchId}` }, () => loadCatalog())
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [branchId, loadCatalog]);
 
   // Debounce search
   useEffect(() => {
@@ -451,7 +476,7 @@ export function POS() {
       const { error: itemsErr } = await supabase.from('sale_items').insert(itemsToInsert);
       if (itemsErr) throw new Error('Failed to record sale items');
 
-      // 3. Decrement inventory (re-fetch to avoid race)
+      // 3. Decrement inventory (re-fetch to avoid race) + log movement
       for (const l of cart) {
         const { data: inv, error: invErr } = await supabase
           .from('inventory')
@@ -465,6 +490,17 @@ export function POS() {
         if (newQty < 0) throw new Error(`Insufficient stock for ${l.name}`);
         const { error: updErr } = await supabase.from('inventory').update({ quantity: newQty }).eq('id', inv.id);
         if (updErr) throw new Error('Inventory update failed');
+        await supabase.from('inventory_movements').insert({
+          variant_id: l.variant_id,
+          branch_id: branchId,
+          movement_type: 'sale',
+          quantity_change: -l.qty,
+          quantity_after: newQty,
+          reference_id: sale.id,
+          reference_type: 'sales',
+          note: `Sale ${receipt_no}`,
+          created_by: profile.id,
+        });
       }
 
       // 4. Record payment

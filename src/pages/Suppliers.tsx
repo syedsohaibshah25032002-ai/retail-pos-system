@@ -5,7 +5,7 @@ import { PageContainer, PageHeader, Card, Button, Input, Select, Modal, Badge, S
 import { formatMoney, formatDate, genReceiptNo } from '../lib/utils';
 import { useToast } from '../lib/toast';
 import { logAudit } from '../lib/audit';
-import { Plus, Truck, Edit2, Trash2, Package, Check } from 'lucide-react';
+import { Plus, Truck, CreditCard as Edit2, Trash2, Package, Check } from 'lucide-react';
 
 type Supplier = {
   id: string;
@@ -76,13 +76,16 @@ export function Suppliers() {
   };
 
   const receivePO = async (po: PO) => {
-    // add stock to receiving branch
+    // add stock to receiving branch + log movements
     for (const item of po.items) {
       const { data: inv } = await supabase.from('inventory').select('id,quantity').eq('branch_id', po.branch_id).eq('variant_id', item.variant_id).maybeSingle();
       if (inv) {
-        await supabase.from('inventory').update({ quantity: inv.quantity + item.qty }).eq('id', inv.id);
+        const newQty = inv.quantity + item.qty;
+        await supabase.from('inventory').update({ quantity: newQty }).eq('id', inv.id);
+        await supabase.from('inventory_movements').insert({ variant_id: item.variant_id, branch_id: po.branch_id, movement_type: 'purchase', quantity_change: item.qty, quantity_after: newQty, reference_id: po.id, reference_type: 'purchase_orders', note: `PO ${po.po_no} received`, created_by: profile?.id ?? null });
       } else {
         await supabase.from('inventory').insert({ branch_id: po.branch_id, variant_id: item.variant_id, quantity: item.qty });
+        await supabase.from('inventory_movements').insert({ variant_id: item.variant_id, branch_id: po.branch_id, movement_type: 'purchase', quantity_change: item.qty, quantity_after: item.qty, reference_id: po.id, reference_type: 'purchase_orders', note: `PO ${po.po_no} received`, created_by: profile?.id ?? null });
       }
     }
     await supabase.from('purchase_orders').update({ status: 'received' }).eq('id', po.id);

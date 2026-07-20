@@ -43,41 +43,71 @@ export function genBarcode(): string {
   return Math.floor(100000000000 + Math.random() * 900000000000).toString();
 }
 
+import JsBarcode from 'jsbarcode';
+
 export function drawBarcode(canvas: HTMLCanvasElement, code: string, label?: string) {
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  const W = canvas.width;
-  const H = canvas.height;
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, W, H);
   if (!code) return;
-  // Code128-like visual barcode: deterministic bars from code digits
-  const bars: number[] = [];
-  for (let i = 0; i < code.length; i++) {
-    const d = code.charCodeAt(i);
-    bars.push((d % 3) + 1, ((d >> 2) % 3) + 1, ((d >> 4) % 3) + 1, ((d >> 6) % 3) + 1);
+  try {
+    JsBarcode(canvas, code, {
+      format: 'CODE128',
+      width: 2,
+      height: 60,
+      displayValue: true,
+      text: label ?? code,
+      font: 'monospace',
+      fontOptions: 'bold',
+      fontSize: 12,
+      textAlign: 'center',
+      textPosition: 'bottom',
+      textMargin: 4,
+      background: '#ffffff',
+      lineColor: '#000000',
+      margin: 10,
+      marginTop: 6,
+      marginBottom: 4,
+    });
+  } catch {
+    // If CODE128 fails for any reason, show error text on canvas
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#ff0000';
+      ctx.font = '12px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('Invalid barcode', canvas.width / 2, canvas.height / 2);
+    }
   }
-  // quiet zone + start
-  const barAreaW = W - 8;
-  const unit = barAreaW / (bars.reduce((a, b) => a + b, 0) + 4);
-  let x = 4;
-  ctx.fillStyle = '#000000';
-  // start bar
-  ctx.fillRect(x, 4, unit * 2, H - (label ? 18 : 8));
-  x += unit * 3;
-  for (let i = 0; i < bars.length; i++) {
-    const w = unit * bars[i];
-    if (i % 2 === 0) ctx.fillRect(x, 4, w, H - (label ? 18 : 8));
-    x += w + unit;
-  }
-  // end bar
-  ctx.fillRect(x, 4, unit * 2, H - (label ? 18 : 8));
-  if (label) {
-    ctx.fillStyle = '#000000';
-    ctx.font = '10px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(label, W / 2, H - 4);
-  }
+}
+
+export function downloadHighResBarcode(code: string, filename: string) {
+  const canvas = document.createElement('canvas');
+  // 300 DPI: scale up 3x from screen resolution
+  canvas.width = 900;
+  canvas.height = 300;
+  try {
+    JsBarcode(canvas, code, {
+      format: 'CODE128',
+      width: 6,
+      height: 180,
+      displayValue: true,
+      text: code,
+      font: 'monospace',
+      fontOptions: 'bold',
+      fontSize: 36,
+      textAlign: 'center',
+      textPosition: 'bottom',
+      textMargin: 12,
+      background: '#ffffff',
+      lineColor: '#000000',
+      margin: 30,
+    });
+  } catch { return; }
+  const url = canvas.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
 }
 
 export function todayISO(): string {

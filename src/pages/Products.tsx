@@ -16,7 +16,7 @@ import { formatMoney, genBarcode } from '../lib/utils';
 import { useToast } from '../lib/toast';
 import { logAudit } from '../lib/audit';
 import { useAuth } from '../lib/auth';
-import { Plus, Search, Package, Edit2, Trash2, Barcode, Layers, Image as ImageIcon } from 'lucide-react';
+import { Plus, Search, Package, CreditCard as Edit2, Trash2, Barcode, Layers, Image as ImageIcon } from 'lucide-react';
 import { BarcodeModal, BulkBarcodeModal } from './products/Barcode';
 
 type Row = {
@@ -75,6 +75,7 @@ export function Products() {
   const [rows, setRows] = useState<Row[]>([]);
   const [brands, setBrands] = useState<{ id: string; name: string }[]>([]);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+  const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
   const [branches, setBranches] = useState<{ id: string; name: string; type: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -86,18 +87,21 @@ export function Products() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [p, b, c, brs] = await Promise.all([
+      const [p, b, c, brs, sup] = await Promise.all([
         supabase
           .from('products')
           .select('id,name,brand_id,category_id,gender,season,style,color,purchase_price,selling_price,tax_rate,barcode,image_url,brands(name),categories(name)')
+          .is('deleted_at', null)
           .order('created_at', { ascending: false }),
         supabase.from('brands').select('id,name').order('name'),
         supabase.from('categories').select('id,name').order('name'),
         supabase.from('branches').select('id,name,type').order('type').order('name'),
+        supabase.from('suppliers').select('id,name').order('name'),
       ]);
       setBrands(b.data ?? []);
       setCategories(c.data ?? []);
       setBranches(brs.data ?? []);
+      setSuppliers(sup.data ?? []);
       const products = (p.data ?? []) as ProductRow[];
       const productIds = products.map((pr) => pr.id);
       if (productIds.length === 0) {
@@ -163,18 +167,15 @@ export function Products() {
   }, [rows, search]);
 
   const del = async (r: Row) => {
-    if (!confirm(`Delete ${r.name} (size ${r.size || '-'})? This removes the variant, its inventory, and the product if no variants remain.`)) return;
+    if (!confirm(`Delete ${r.name}${r.size ? ' (size ' + r.size + ')' : ''}? This will soft-delete the product and hide it from POS. All variants, inventory, barcodes, and price history will be removed.`)) return;
     try {
-      if (r.variant_id) {
-        await supabase.from('inventory').delete().eq('variant_id', r.variant_id);
-        await supabase.from('sale_items').delete().eq('variant_id', r.variant_id);
-        await supabase.from('product_variants').delete().eq('id', r.variant_id);
-      }
-      const { count } = await supabase.from('product_variants').select('id', { count: 'exact' }).eq('product_id', r.product_id);
-      if (count === 0) {
-        await supabase.from('products').delete().eq('id', r.product_id);
-      }
-      success('Product deleted');
+      // Soft-delete the product: mark deleted_at + is_active=false so it disappears from POS
+      await supabase.from('products').update({ deleted_at: new Date().toISOString(), is_active: false }).eq('id', r.product_id);
+      // Hard-delete related data: variants (cascades to inventory via FK), price history, images
+      await supabase.from('price_history').delete().eq('product_id', r.product_id);
+      await supabase.from('product_images').delete().eq('product_id', r.product_id);
+      await supabase.from('product_variants').delete().eq('product_id', r.product_id);
+      success('Product deleted and hidden from POS');
       await logAudit('deleted_product', 'products', r.product_id, { name: r.name, size: r.size });
       await load();
     } catch (e) {
@@ -182,10 +183,28 @@ export function Products() {
     }
   };
 
+  const delBrand = async (id: string, name: string) => {
+    const { count } = await supabase.from('products').select('id', { count: 'exact', head: true }).eq('brand_id', id).is('deleted_at', null);
+    if (count && count > 0) { error(`Cannot delete "${name}" — ${count} product(s) still use this brand.`); return; }
+    if (!confirm(`Delete brand "${name}"?`)) return;
+    const { error: e } = await supabase.from('brands').delete().eq('id', id);
+    if (e) { error(e.message); return; }
+    success('Brand deleted'); await load();
+  };
+
+  const delCat = async (id: string, name: string) => {
+    const { count } = await supabase.from('products').select('id', { count: 'exact', head: true }).eq('category_id', id).is('deleted_at', null);
+    if (count && count > 0) { error(`Cannot delete "${name}" — ${count} product(s) still use this category.`); return; }
+    if (!confirm(`Delete category "${name}"?`)) return;
+    const { error: e } = await supabase.from('categories').delete().eq('id', id);
+    if (e) { error(e.message); return; }
+    success('Category deleted'); await load();
+  };
+
   const printBulk = () => {
     const items = filtered
       .filter((r) => r.variant_barcode)
-      .map((r) => ({ code: r.variant_barcode!, name: r.name, size: r.size }));
+      .map((r) => ({ code: r.variant_barcode!, name: r.name, size: r.size, color: r.color, price: r.selling_price }));
     if (items.length === 0) { error('No barcodes available to print'); return; }
     setBulkItems(items);
   };
@@ -301,6 +320,7 @@ export function Products() {
           brands={brands}
           categories={categories}
           branches={branches}
+          suppliers={suppliers}
           onClose={() => setShowForm(false)}
           onSaved={() => { setShowForm(false); load(); success('Product saved'); }}
         />
@@ -345,6 +365,7 @@ function ProductForm({
   brands,
   categories,
   branches,
+  suppliers,
   onClose,
   onSaved,
 }: {
@@ -352,6 +373,7 @@ function ProductForm({
   brands: { id: string; name: string }[];
   categories: { id: string; name: string }[];
   branches: { id: string; name: string; type: string }[];
+  suppliers: { id: string; name: string }[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -372,8 +394,10 @@ function ProductForm({
   const [stockQty, setStockQty] = useState('0');
   const [branchId, setBranchId] = useState(profile?.branch_id ?? '');
   const [warehouseId, setWarehouseId] = useState('');
+  const [supplierId, setSupplierId] = useState('');
   const [reorderLevel, setReorderLevel] = useState('5');
   const [minStock, setMinStock] = useState('3');
+  const [maxStock, setMaxStock] = useState('100');
   const [barcode, setBarcode] = useState(editing?.variant_barcode ?? editing?.barcode ?? '');
   const [sku, setSku] = useState(editing?.sku ?? '');
   const [saving, setSaving] = useState(false);
@@ -422,6 +446,7 @@ function ProductForm({
         name: name.trim(),
         brand_id: bId || null,
         category_id: cId || null,
+        supplier_id: supplierId || null,
         gender: gender || null,
         color: color || null,
         season: season || null,
@@ -431,6 +456,10 @@ function ProductForm({
         tax_rate: Number(tax) || 0,
         barcode: barcode || genBarcode(),
         image_url: imageUrl || null,
+        min_stock: Number(minStock) || 0,
+        max_stock: Number(maxStock) || 0,
+        reorder_level: Number(reorderLevel) || 5,
+        is_active: true,
       };
       let productId = editing?.product_id ?? '';
       if (editing) {
@@ -448,6 +477,14 @@ function ProductForm({
       const min = Number(minStock) || 3;
       const effectiveLow = Math.min(low, min);
 
+      // Log price history
+      await supabase.from('price_history').insert({
+        product_id: productId,
+        purchase_price: Number(purchase) || 0,
+        selling_price: Number(selling) || 0,
+        changed_by: profile?.id ?? null,
+      });
+
       if (editing?.variant_id) {
         // update existing variant
         const { error: ve } = await supabase
@@ -455,13 +492,16 @@ function ProductForm({
           .update({ size: sizes[0] ?? editing.size, barcode: barcode || genBarcode(), sku: sku || null })
           .eq('id', editing.variant_id);
         if (ve) throw ve;
-        // upsert inventory for selected branch
-        if (branchId) {
+        // upsert inventory for selected branch + log movement
+        if (branchId && qty > 0) {
           const { data: exInv } = await supabase.from('inventory').select('id,quantity').eq('branch_id', branchId).eq('variant_id', editing.variant_id).maybeSingle();
           if (exInv) {
-            await supabase.from('inventory').update({ quantity: exInv.quantity + qty, low_stock_threshold: effectiveLow }).eq('id', exInv.id);
+            const newQty = exInv.quantity + qty;
+            await supabase.from('inventory').update({ quantity: newQty, low_stock_threshold: effectiveLow }).eq('id', exInv.id);
+            await supabase.from('inventory_movements').insert({ variant_id: editing.variant_id, branch_id: branchId, movement_type: 'manual', quantity_change: qty, quantity_after: newQty, note: 'Stock adjustment on edit', created_by: profile?.id ?? null });
           } else {
             await supabase.from('inventory').insert({ branch_id: branchId, variant_id: editing.variant_id, quantity: qty, low_stock_threshold: effectiveLow });
+            await supabase.from('inventory_movements').insert({ variant_id: editing.variant_id, branch_id: branchId, movement_type: 'opening', quantity_change: qty, quantity_after: qty, note: 'Opening stock on edit', created_by: profile?.id ?? null });
           }
         }
       } else {
@@ -474,15 +514,25 @@ function ProductForm({
         }));
         const { data: newVariants, error: ve } = await supabase.from('product_variants').insert(variantRows).select('id,size');
         if (ve) throw ve;
-        // create inventory rows for each variant at selected branch + warehouse
+        // create inventory rows for each variant at selected branch + warehouse + log movements
         const invRows: { branch_id: string; variant_id: string; quantity: number; low_stock_threshold: number }[] = [];
+        const movRows: { variant_id: string; branch_id: string; movement_type: string; quantity_change: number; quantity_after: number; note: string; created_by: string | null }[] = [];
         (newVariants ?? []).forEach((v) => {
-          if (branchId) invRows.push({ branch_id: branchId, variant_id: v.id, quantity: qty, low_stock_threshold: effectiveLow });
-          if (warehouseId && warehouseId !== branchId) invRows.push({ branch_id: warehouseId, variant_id: v.id, quantity: qty, low_stock_threshold: effectiveLow });
+          if (branchId) {
+            invRows.push({ branch_id: branchId, variant_id: v.id, quantity: qty, low_stock_threshold: effectiveLow });
+            movRows.push({ variant_id: v.id, branch_id: branchId, movement_type: 'opening', quantity_change: qty, quantity_after: qty, note: 'Opening stock', created_by: profile?.id ?? null });
+          }
+          if (warehouseId && warehouseId !== branchId) {
+            invRows.push({ branch_id: warehouseId, variant_id: v.id, quantity: qty, low_stock_threshold: effectiveLow });
+            movRows.push({ variant_id: v.id, branch_id: warehouseId, movement_type: 'opening', quantity_change: qty, quantity_after: qty, note: 'Opening stock (warehouse)', created_by: profile?.id ?? null });
+          }
         });
         if (invRows.length > 0) {
           const { error: ie2 } = await supabase.from('inventory').insert(invRows);
           if (ie2) throw ie2;
+        }
+        if (movRows.length > 0) {
+          await supabase.from('inventory_movements').insert(movRows);
         }
       }
       await logAudit(editing ? 'updated_product' : 'created_product', 'products', productId, { name, sizes });
@@ -499,8 +549,14 @@ function ProductForm({
       <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
         <Input label="Product Name" value={name} onChange={setName} placeholder="Nike Air Max" required error={errs.name} />
         <div className="grid grid-cols-2 gap-4">
-          <Select label="Brand" value={brandId} onChange={setBrandId} options={[{ value: '', label: '— select —' }, ...brands.map((b) => ({ value: b.id, label: b.name }))]} />
-          <Select label="Category" value={categoryId} onChange={setCategoryId} options={[{ value: '', label: '— select —' }, ...categories.map((c) => ({ value: c.id, label: c.name }))]} />
+          <div>
+            <Select label="Brand" value={brandId} onChange={setBrandId} options={[{ value: '', label: '— select —' }, ...brands.map((b) => ({ value: b.id, label: b.name }))]} />
+            {brandId && <button type="button" onClick={() => { const b = brands.find((x) => x.id === brandId); if (b) delBrand(b.id, b.name); }} className="text-xs text-red-500 hover:text-red-700 mt-1">Delete this brand</button>}
+          </div>
+          <div>
+            <Select label="Category" value={categoryId} onChange={setCategoryId} options={[{ value: '', label: '— select —' }, ...categories.map((c) => ({ value: c.id, label: c.name }))]} />
+            {categoryId && <button type="button" onClick={() => { const c = categories.find((x) => x.id === categoryId); if (c) delCat(c.id, c.name); }} className="text-xs text-red-500 hover:text-red-700 mt-1">Delete this category</button>}
+          </div>
         </div>
         <div className="flex gap-2">
           <input placeholder="or new brand name" value={newBrand} onChange={(e) => setNewBrand(e.target.value)} className="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-white" />
@@ -518,6 +574,7 @@ function ProductForm({
           <Input label="Selling Price" value={selling} onChange={setSelling} type="number" error={errs.selling} />
           <Input label="Tax Rate (%)" value={tax} onChange={setTax} type="number" />
         </div>
+        <Select label="Supplier" value={supplierId} onChange={setSupplierId} options={[{ value: '', label: '— select —' }, ...suppliers.map((s) => ({ value: s.id, label: s.name }))]} />
         <div className="grid grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Barcode</label>
@@ -539,8 +596,9 @@ function ProductForm({
               </div>
               {errs.sizes && <p className="text-xs text-red-500 mt-1">{errs.sizes}</p>}
             </div>
-            <div className="grid grid-cols-3 gap-4">
-              <Input label="Initial Stock (per size)" value={stockQty} onChange={setStockQty} type="number" error={errs.stock} />
+            <div className="grid grid-cols-2 gap-4">
+              <Input label="Opening Quantity (per size)" value={stockQty} onChange={setStockQty} type="number" error={errs.stock} />
+              <Input label="Max Stock" value={maxStock} onChange={setMaxStock} type="number" />
               <Input label="Reorder Level" value={reorderLevel} onChange={setReorderLevel} type="number" />
               <Input label="Minimum Stock" value={minStock} onChange={setMinStock} type="number" />
             </div>
