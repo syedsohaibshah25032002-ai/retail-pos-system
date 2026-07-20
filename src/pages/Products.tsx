@@ -18,6 +18,8 @@ import { logAudit } from '../lib/audit';
 import { useAuth } from '../lib/auth';
 import { Plus, Search, Package, CreditCard as Edit2, Trash2, Barcode, Layers, Image as ImageIcon } from 'lucide-react';
 import { BarcodeModal, BulkBarcodeModal } from './products/Barcode';
+import { BarcodeScannerModal } from './products/BarcodeScanner';
+import { ScanLine } from 'lucide-react';
 
 type Row = {
   product_id: string;
@@ -83,6 +85,7 @@ export function Products() {
   const [showForm, setShowForm] = useState(false);
   const [barcodeItem, setBarcodeItem] = useState<{ code: string; name: string } | null>(null);
   const [bulkItems, setBulkItems] = useState<{ code: string; name: string; size: string }[]>([]);
+  const [showScanner, setShowScanner] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -216,6 +219,7 @@ export function Products() {
         subtitle="Inventory matrix with barcodes, stock levels, and POS sync"
         action={
           <div className="flex gap-2">
+            <Button variant="secondary" onClick={() => setShowScanner(true)}><ScanLine size={16} className="inline mr-1" /> Test Barcode</Button>
             <Button variant="secondary" onClick={printBulk}><Layers size={16} className="inline mr-1" /> Bulk Barcodes</Button>
             <Button onClick={() => { setEditing(null); setShowForm(true); }}><Plus size={16} className="inline mr-1" /> New Product</Button>
           </div>
@@ -321,12 +325,15 @@ export function Products() {
           categories={categories}
           branches={branches}
           suppliers={suppliers}
+          onDeleteBrand={delBrand}
+          onDeleteCategory={delCat}
           onClose={() => setShowForm(false)}
           onSaved={() => { setShowForm(false); load(); success('Product saved'); }}
         />
       )}
       {barcodeItem && <BarcodeModal code={barcodeItem.code} name={barcodeItem.name} onClose={() => setBarcodeItem(null)} />}
       {bulkItems.length > 0 && <BulkBarcodeModal items={bulkItems} onClose={() => setBulkItems([])} />}
+      {showScanner && <BarcodeScannerModal onClose={() => setShowScanner(false)} />}
     </PageContainer>
   );
 }
@@ -366,6 +373,8 @@ function ProductForm({
   categories,
   branches,
   suppliers,
+  onDeleteBrand,
+  onDeleteCategory,
   onClose,
   onSaved,
 }: {
@@ -374,6 +383,8 @@ function ProductForm({
   categories: { id: string; name: string }[];
   branches: { id: string; name: string; type: string }[];
   suppliers: { id: string; name: string }[];
+  onDeleteBrand: (id: string, name: string) => void;
+  onDeleteCategory: (id: string, name: string) => void;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -430,6 +441,26 @@ function ProductForm({
     if (!validate()) return;
     setSaving(true);
     try {
+      // Verify barcode uniqueness before saving
+      const finalBarcode = barcode || genBarcode();
+      const { data: existingP } = await supabase
+        .from('products')
+        .select('id, name')
+        .eq('barcode', finalBarcode)
+        .is('deleted_at', null)
+        .maybeSingle();
+      if (existingP && existingP.id !== (editing?.product_id ?? '')) {
+        throw new Error(`Barcode ${finalBarcode} is already assigned to "${existingP.name}". Generate a new barcode.`);
+      }
+      const { data: existingV } = await supabase
+        .from('product_variants')
+        .select('id, products(name)')
+        .eq('barcode', finalBarcode)
+        .maybeSingle();
+      if (existingV && existingV.id !== (editing?.variant_id ?? '')) {
+        throw new Error(`Barcode ${finalBarcode} is already assigned to "${(existingV as any).products?.name ?? 'another variant'}". Generate a new barcode.`);
+      }
+
       let bId = brandId;
       let cId = categoryId;
       if (newBrand.trim()) {
@@ -454,7 +485,7 @@ function ProductForm({
         purchase_price: Number(purchase) || 0,
         selling_price: Number(selling) || 0,
         tax_rate: Number(tax) || 0,
-        barcode: barcode || genBarcode(),
+        barcode: finalBarcode,
         image_url: imageUrl || null,
         min_stock: Number(minStock) || 0,
         max_stock: Number(maxStock) || 0,
@@ -551,11 +582,11 @@ function ProductForm({
         <div className="grid grid-cols-2 gap-4">
           <div>
             <Select label="Brand" value={brandId} onChange={setBrandId} options={[{ value: '', label: '— select —' }, ...brands.map((b) => ({ value: b.id, label: b.name }))]} />
-            {brandId && <button type="button" onClick={() => { const b = brands.find((x) => x.id === brandId); if (b) delBrand(b.id, b.name); }} className="text-xs text-red-500 hover:text-red-700 mt-1">Delete this brand</button>}
+            {brandId && <button type="button" onClick={() => { const b = brands.find((x) => x.id === brandId); if (b) onDeleteBrand(b.id, b.name); }} className="text-xs text-red-500 hover:text-red-700 mt-1">Delete this brand</button>}
           </div>
           <div>
             <Select label="Category" value={categoryId} onChange={setCategoryId} options={[{ value: '', label: '— select —' }, ...categories.map((c) => ({ value: c.id, label: c.name }))]} />
-            {categoryId && <button type="button" onClick={() => { const c = categories.find((x) => x.id === categoryId); if (c) delCat(c.id, c.name); }} className="text-xs text-red-500 hover:text-red-700 mt-1">Delete this category</button>}
+            {categoryId && <button type="button" onClick={() => { const c = categories.find((x) => x.id === categoryId); if (c) onDeleteCategory(c.id, c.name); }} className="text-xs text-red-500 hover:text-red-700 mt-1">Delete this category</button>}
           </div>
         </div>
         <div className="flex gap-2">

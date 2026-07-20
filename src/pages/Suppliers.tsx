@@ -31,6 +31,7 @@ type PO = {
 
 export function Suppliers() {
   const { success } = useToast();
+  const { profile } = useAuth();
   const [tab, setTab] = useState<'suppliers' | 'pos'>('suppliers');
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [pos, setPos] = useState<PO[]>([]);
