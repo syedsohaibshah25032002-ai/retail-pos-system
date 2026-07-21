@@ -19,7 +19,10 @@ export type Branch = {
   type: 'warehouse' | 'shop' | 'online';
   address: string | null;
   phone: string | null;
+  email: string | null;
+  manager: string | null;
   is_main: boolean;
+  is_active: boolean;
   created_at: string;
 };
 

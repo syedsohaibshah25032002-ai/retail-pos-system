@@ -1,15 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
-import { PageContainer, PageHeader, Card, Button, Input, Select, Modal, Badge, Spinner, EmptyState } from '../components/ui';
+import { PageContainer, PageHeader, Card, Button, Input, Select, Modal, Badge, Spinner, EmptyState, SearchInput } from '../components/ui';
 import { formatMoney, formatDateTime, genReceiptNo } from '../lib/utils';
 import { useToast } from '../lib/toast';
 import { logAudit } from '../lib/audit';
-import { Search, Undo2, CheckCircle2 } from 'lucide-react';
+import { Undo2, CheckCircle2, AlertCircle } from 'lucide-react';
 
 export function Returns() {
   const { profile } = useAuth();
-  const { success } = useToast();
+  const { success, error } = useToast();
   const [search, setSearch] = useState('');
   const [sale, setSale] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
@@ -17,37 +17,43 @@ export function Returns() {
   const [showProcess, setShowProcess] = useState(false);
   const [branchId, setBranchId] = useState(profile?.branch_id ?? '');
 
-  useEffect(() => {
-    (async () => {
-      const { data } = await supabase.from('sales_returns').select('*,sales(receipt_no,total)').order('created_at', { ascending: false }).limit(20);
-      setReturns(data ?? []);
-      if (!branchId) {
-        const { data: b } = await supabase.from('branches').select('id,name').order('name').limit(1).maybeSingle();
-        if (b) setBranchId(b.id);
-      }
-    })();
+  const loadReturns = useCallback(async () => {
+    const { data } = await supabase.from('sales_returns').select('*,sales(receipt_no,total)').order('created_at', { ascending: false }).limit(20);
+    setReturns(data ?? []);
   }, []);
+
+  useEffect(() => {
+    loadReturns();
+    if (!branchId) {
+      supabase.from('branches').select('id,name').order('name').limit(1).maybeSingle().then(({ data: b }) => { if (b) setBranchId(b.id); });
+    }
+  }, [loadReturns]);
 
   const findSale = async () => {
     setLoading(true);
-    const { data } = await supabase
-      .from('sales')
-      .select('id,receipt_no,branch_id,total,status,created_at,sale_items(id,variant_id,qty,unit_price,line_total)')
-      .eq('receipt_no', search.trim())
-      .maybeSingle();
-    if (data) {
-      const vIds = (data.sale_items ?? []).map((i: any) => i.variant_id);
-      const { data: variants } = await supabase.from('product_variants').select('id,product_id,size').in('id', vIds);
-      const pIds = [...new Set((variants ?? []).map((v: any) => v.product_id))];
-      const { data: products } = await supabase.from('products').select('id,name').in('id', pIds);
-      const pMap = new Map((products ?? []).map((p: any) => [p.id, p.name]));
-      const vMap = new Map((variants ?? []).map((v: any) => [v.id, { name: pMap.get(v.product_id) ?? '?', size: v.size }]));
-      setSale({ ...data, items: (data.sale_items ?? []).map((i: any) => ({ ...i, ...vMap.get(i.variant_id) })) });
-      setShowProcess(true);
-    } else {
-      alert('Receipt not found.');
+    try {
+      const { data } = await supabase
+        .from('sales')
+        .select('id,receipt_no,branch_id,total,status,created_at,sale_items(id,variant_id,qty,unit_price,line_total)')
+        .eq('receipt_no', search.trim())
+        .maybeSingle();
+      if (data) {
+        const vIds = (data.sale_items ?? []).map((i: any) => i.variant_id);
+        const { data: variants } = await supabase.from('product_variants').select('id,product_id,size').in('id', vIds);
+        const pIds = [...new Set((variants ?? []).map((v: any) => v.product_id))];
+        const { data: products } = await supabase.from('products').select('id,name').in('id', pIds);
+        const pMap = new Map((products ?? []).map((p: any) => [p.id, p.name]));
+        const vMap = new Map((variants ?? []).map((v: any) => [v.id, { name: pMap.get(v.product_id) ?? '?', size: v.size }]));
+        setSale({ ...data, items: (data.sale_items ?? []).map((i: any) => ({ ...i, ...vMap.get(i.variant_id) })) });
+        setShowProcess(true);
+      } else {
+        error(`Receipt "${search.trim()}" not found.`);
+      }
+    } catch (e) {
+      error(e instanceof Error ? e.message : 'Failed to find receipt');
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   return (
@@ -55,10 +61,7 @@ export function Returns() {
       <PageHeader title="Sales Returns" subtitle="Process returns, exchanges, and refunds by receipt" />
       <Card className="p-4 mb-4">
         <div className="flex gap-2">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-            <input value={search} onChange={(e) => setSearch(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && findSale()} placeholder="Enter receipt number (e.g. R-20260101-ABC23)..." className="w-full pl-9 pr-3 py-2.5 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900" />
-          </div>
+          <SearchInput value={search} onChange={setSearch} placeholder="Enter receipt number (e.g. R-20260101-ABC23)..." className="flex-1" />
           <Button onClick={findSale} disabled={loading || !search}>{loading ? <Spinner /> : 'Find Receipt'}</Button>
         </div>
       </Card>
@@ -101,7 +104,7 @@ export function Returns() {
 }
 
 function ProcessReturnModal({ sale, branchId, createdBy, onClose, onDone }: { sale: any; branchId: string; createdBy?: string; onClose: () => void; onDone: () => void }) {
-  const { success } = useToast();
+  const { success, error } = useToast();
   const [returnQty, setReturnQty] = useState<Record<string, number>>({});
   const [refundType, setRefundType] = useState('cash');
   const [reason, setReason] = useState('');
@@ -111,14 +114,16 @@ function ProcessReturnModal({ sale, branchId, createdBy, onClose, onDone }: { sa
 
   const save = async () => {
     const items = (sale.sale_items ?? sale.items ?? []).filter((i: any) => (returnQty[i.id] ?? 0) > 0);
-    if (items.length === 0) { alert('Select items to return.'); return; }
+    if (items.length === 0) { error('Select at least one item to return.'); return; }
     setSaving(true);
-    const return_no = genReceiptNo('RT');
-    const { data: ret } = await supabase.from('sales_returns').insert({
-      return_no, original_sale_id: sale.id, refund_amount: refund, refund_type: refundType, reason, branch_id: branchId, created_by: createdBy ?? null,
-    }).select().single();
-    if (ret) {
-      await supabase.from('sales_return_items').insert(items.map((i: any) => ({ return_id: ret.id, sale_item_id: i.id, qty: returnQty[i.id] })));
+    try {
+      const return_no = genReceiptNo('RT');
+      const { data: ret, error: re } = await supabase.from('sales_returns').insert({
+        return_no, original_sale_id: sale.id, refund_amount: refund, refund_type: refundType, reason, branch_id: branchId, created_by: createdBy ?? null,
+      }).select().single();
+      if (re) throw re;
+      if (ret) {
+        await supabase.from('sales_return_items').insert(items.map((i: any) => ({ return_id: ret.id, sale_item_id: i.id, qty: returnQty[i.id] })));
       // restock inventory + log movements
       for (const i of items) {
         const { data: inv } = await supabase.from('inventory').select('id,quantity').eq('branch_id', branchId).eq('variant_id', i.variant_id).maybeSingle();
@@ -132,11 +137,15 @@ function ProcessReturnModal({ sale, branchId, createdBy, onClose, onDone }: { sa
           await supabase.from('inventory_movements').insert({ variant_id: i.variant_id, branch_id: branchId, movement_type: 'return', quantity_change: retQty, quantity_after: retQty, reference_id: ret.id, reference_type: 'sales_returns', note: `Return ${return_no}`, created_by: createdBy ?? null });
         }
       }
+      }
+      success(`Return ${return_no} processed — ${formatMoney(refund)} refunded`);
+      await logAudit('processed_return', 'sales_returns', ret.id, { return_no, refund });
+      onDone();
+    } catch (e) {
+      error(e instanceof Error ? e.message : 'Failed to process return');
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
-    success(`Return ${return_no} processed`);
-    await logAudit('processed_return', 'sales_returns', ret.id, { return_no, refund });
-    onDone();
   };
 
   return (

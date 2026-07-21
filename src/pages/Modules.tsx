@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
 import { useApp } from '../lib/app-context';
 import { useAuth } from '../lib/auth';
-import { PageContainer, PageHeader, Card, Button, Input, Select, Badge, Spinner, EmptyState, Modal, ConfirmDialog } from '../components/ui';
+import { PageContainer, PageHeader, Card, Button, Input, Select, Badge, Spinner, EmptyState, ErrorState, Modal, ConfirmDialog, SearchInput, Pagination, TableSkeleton } from '../components/ui';
 import { useToast } from '../lib/toast';
 import { formatMoney, formatMoneyShort, formatNumber, formatDate, formatDateTime, genBarcode } from '../lib/utils';
-import { Package, AlertTriangle, XCircle, Search, RefreshCw, Warehouse as WarehouseIcon, ClipboardList, Calculator, Award, Barcode, Settings as SettingsIcon, FileText, DatabaseBackup, Tag, Percent, Plus, Trash2, CreditCard as Edit2, Printer, TrendingUp, TrendingDown, Wallet, Receipt, Download, Shield, ArrowUpRight } from 'lucide-react';
+import { Package, AlertTriangle, XCircle, Search, RefreshCw, Warehouse as WarehouseIcon, ClipboardList, Calculator, Award, Barcode, Settings as SettingsIcon, FileText, DatabaseBackup, Tag, Percent, Plus, Trash2, CreditCard as Edit2, Printer, TrendingUp, TrendingDown, Wallet, Receipt, Download, Shield, ArrowUpRight, Check } from 'lucide-react';
 import type { NavKey } from '../components/AppShell';
 
 /* ============================ INVENTORY ============================ */
@@ -384,60 +384,201 @@ export function Loyalty() {
 }
 
 /* ============================ BARCODE LABELS ============================ */
+const LABEL_SIZES = [
+  { key: '50x25', w: 50, h: 25, label: '50×25 mm (Small)' },
+  { key: '60x40', w: 60, h: 40, label: '60×40 mm (Medium)' },
+  { key: '100x50', w: 100, h: 50, label: '100×50 mm (Large)' },
+];
+const BC_PAGE_SIZE = 24;
+
 export function BarcodeLabels() {
+  const { success, error } = useToast();
   const [variants, setVariants] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [labelSize, setLabelSize] = useState('50x25');
+  const [page, setPage] = useState(1);
 
   useEffect(() => {
     (async () => {
-      const { data: vs } = await supabase.from('product_variants').select('id,product_id,size,barcode').order('size');
-      const pIds = [...new Set((vs ?? []).map((v) => v.product_id))];
-      const { data: products } = await supabase.from('products').select('id,name,color').in('id', pIds);
-      const pMap = new Map((products ?? []).map((p: any) => [p.id, p]));
-      setVariants((vs ?? []).map((v: any) => ({ ...v, product_name: pMap.get(v.product_id)?.name ?? '?', color: pMap.get(v.product_id)?.color ?? '-' })));
-      setLoading(false);
+      setLoading(true);
+      setLoadError(null);
+      try {
+        const { data: vs, error: ve } = await supabase
+          .from('product_variants')
+          .select('id,product_id,size,barcode,sku')
+          .not('barcode', 'is', null)
+          .order('size');
+        if (ve) throw ve;
+        const pIds = [...new Set((vs ?? []).map((v) => v.product_id))];
+        const { data: products, error: pe } = await supabase
+          .from('products')
+          .select('id,name,color,selling_price')
+          .in('id', pIds);
+        if (pe) throw pe;
+        const pMap = new Map((products ?? []).map((p: any) => [p.id, p]));
+        setVariants((vs ?? []).map((v: any) => ({
+          ...v,
+          product_name: pMap.get(v.product_id)?.name ?? '?',
+          color: pMap.get(v.product_id)?.color ?? '-',
+          price: pMap.get(v.product_id)?.selling_price ?? 0,
+        })));
+      } catch (e) {
+        setLoadError(e instanceof Error ? e.message : 'Failed to load barcodes');
+      } finally {
+        setLoading(false);
+      }
     })();
   }, []);
 
-  const filtered = variants.filter((v) => !search || v.product_name.toLowerCase().includes(search.toLowerCase()) || v.barcode?.includes(search));
-  const toggle = (id: string) => setSelected((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
-  const print = () => {
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase().trim();
+    if (!q) return variants;
+    return variants.filter(
+      (v) =>
+        v.product_name.toLowerCase().includes(q) ||
+        v.barcode?.includes(q) ||
+        v.size?.includes(q) ||
+        v.sku?.toLowerCase().includes(q)
+    );
+  }, [variants, search]);
+
+  const totalPages = Math.ceil(filtered.length / BC_PAGE_SIZE);
+  const paged = filtered.slice((page - 1) * BC_PAGE_SIZE, page * BC_PAGE_SIZE);
+
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+
+  const selectAll = () => setSelected(new Set(filtered.map((v) => v.id)));
+  const clearAll = () => setSelected(new Set());
+  const selectPage = () => setSelected((prev) => new Set([...prev, ...paged.map((v) => v.id)]));
+
+  const sizeDef = LABEL_SIZES.find((s) => s.key === labelSize) ?? LABEL_SIZES[0];
+
+  const printSelected = () => {
     const labels = variants.filter((v) => selected.has(v.id));
-    const html = labels.map((v) => `<div style="border:1px solid #000;padding:8px;width:200px;display:inline-block;margin:4px;text-align:center;font-family:monospace"><div style="font-weight:bold">${v.product_name}</div><div>Size: ${v.size} · ${v.color}</div><div style="font-size:24px;letter-spacing:2px">${v.barcode}</div><div style="border-top:1px solid #ccc;margin-top:4px;padding-top:4px">||||||||||||||||||||||</div></div>`).join('');
+    if (labels.length === 0) { error('Select at least one barcode to print'); return; }
+    const html = labels
+      .map(
+        (v) =>
+          `<div style="display:inline-block;width:${sizeDef.w}mm;height:${sizeDef.h}mm;margin:2mm;border:1px dashed #ccc;padding:1mm;text-align:center;font-family:Arial,sans-serif;overflow:hidden">
+            <div style="font-size:7px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${v.product_name}</div>
+            <div style="font-size:6px;color:#666">Sz ${v.size}${v.color !== '-' ? ' · ' + v.color : ''}</div>
+            <div style="font-size:9px;font-family:monospace;letter-spacing:1px;margin-top:2px">${v.barcode}</div>
+            <div style="border-top:1px solid #ccc;margin-top:4px;padding-top:4px;font-size:24px;letter-spacing:2px">${'|||'.repeat(Math.min(20, Math.floor(sizeDef.w / 3)))}</div>
+          </div>`
+      )
+      .join('');
     const w = window.open('', '_blank');
-    if (w) { w.document.write(`<html><head><title>Barcode Labels</title></head><body>${html}<script>window.print()</script></body></html>`); w.document.close(); }
+    if (!w) { error('Popup blocked. Allow popups to print barcodes.'); return; }
+    w.document.write(`<html><head><title>Barcode Labels (${labels.length})</title><style>@page{size:auto;margin:5mm}body{margin:5mm}</style></head><body>${html}<script>window.print();window.close()</script></body></html>`);
+    w.document.close();
+    success(`Printing ${labels.length} barcode labels`);
+  };
+
+  const exportPDF = () => {
+    const labels = variants.filter((v) => selected.has(v.id));
+    if (labels.length === 0) { error('Select at least one barcode to export'); return; }
+    const html = labels
+      .map(
+        (v) =>
+          `<div style="display:inline-block;width:${sizeDef.w}mm;height:${sizeDef.h}mm;margin:2mm;border:1px solid #000;padding:2mm;text-align:center;font-family:Arial,sans-serif">
+            <div style="font-weight:bold;font-size:8px">${v.product_name}</div>
+            <div style="font-size:6px;color:#666">Sz ${v.size} · ${v.color}</div>
+            <div style="font-family:monospace;font-size:10px;margin-top:4px">${v.barcode}</div>
+          </div>`
+      )
+      .join('');
+    const w = window.open('', '_blank');
+    if (!w) { error('Popup blocked. Allow popups to export.'); return; }
+    w.document.write(`<html><head><title>Barcode Export (${labels.length})</title><style>@page{size:A4;margin:10mm}body{margin:10mm}</style></head><body>${html}<script>window.print();window.close()</script></body></html>`);
+    w.document.close();
+    success(`Exported ${labels.length} barcodes to PDF`);
   };
 
   return (
     <PageContainer>
-      <PageHeader title="Barcode Labels" subtitle="Generate and print barcode labels" action={<Button onClick={print} disabled={selected.size === 0}><Printer size={16} className="inline mr-1" /> Print {selected.size} Labels</Button>} />
+      <PageHeader
+        title="Barcode Labels"
+        subtitle="Generate and print barcode labels in bulk"
+        action={
+          <div className="flex gap-2">
+            <Button variant="secondary" onClick={exportPDF} disabled={selected.size === 0}><FileText size={16} /> PDF Export ({selected.size})</Button>
+            <Button onClick={printSelected} disabled={selected.size === 0}><Printer size={16} /> Print ({selected.size})</Button>
+          </div>
+        }
+      />
+
       <Card className="p-4 mb-4">
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search products or barcodes..." className="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-700 text-sm" />
+        <div className="flex gap-2 flex-wrap items-end">
+          <SearchInput value={search} onChange={(v) => { setSearch(v); setPage(1); }} placeholder="Search by product, barcode, size, SKU..." className="flex-1 min-w-[200px]" />
+          <Select
+            label="Label Size"
+            value={labelSize}
+            onChange={setLabelSize}
+            options={LABEL_SIZES.map((s) => ({ value: s.key, label: s.label }))}
+            className="w-48"
+          />
         </div>
+        {filtered.length > 0 && (
+          <div className="flex items-center gap-2 mt-3 text-sm">
+            <button onClick={selectAll} className="text-emerald-600 hover:underline font-medium">Select All ({filtered.length})</button>
+            <span className="text-slate-300">|</span>
+            <button onClick={selectPage} className="text-slate-600 dark:text-slate-300 hover:underline">Select Page</button>
+            <span className="text-slate-300">|</span>
+            <button onClick={clearAll} className="text-red-500 hover:underline">Clear</button>
+            <span className="ml-auto text-xs text-slate-500 dark:text-slate-400">{selected.size} selected</span>
+          </div>
+        )}
       </Card>
-      <Card className="overflow-hidden">
-        {loading ? <div className="flex justify-center py-12"><Spinner /></div> : filtered.length === 0 ? <EmptyState message="No variants found." /> : (
+
+      {loading ? (
+        <Card><TableSkeleton rows={6} cols={4} /></Card>
+      ) : loadError ? (
+        <Card><ErrorState message={loadError} onRetry={() => window.location.reload()} /></Card>
+      ) : paged.length === 0 ? (
+        <Card><EmptyState message="No barcodes found. Add barcodes to your product variants first." /></Card>
+      ) : (
+        <Card className="overflow-hidden">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 p-4">
-            {filtered.slice(0, 60).map((v) => (
-              <div key={v.id} onClick={() => toggle(v.id)} className={`p-3 rounded-lg border cursor-pointer transition-colors ${selected.has(v.id) ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20' : 'border-slate-200 dark:border-slate-700 hover:border-slate-300'}`}>
+            {paged.map((v) => (
+              <div
+                key={v.id}
+                onClick={() => toggle(v.id)}
+                role="checkbox"
+                aria-checked={selected.has(v.id)}
+                tabIndex={0}
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(v.id); } }}
+                className={`p-3 rounded-lg border cursor-pointer transition-all ${selected.has(v.id) ? 'border-emerald-500 bg-emerald-50 dark:bg-emerald-900/20 ring-1 ring-emerald-500' : 'border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600'}`}
+              >
                 <div className="flex items-center justify-between mb-2">
-                  <span className="font-medium text-sm text-slate-800 dark:text-slate-200">{v.product_name}</span>
-                  <Badge color="slate">Sz {v.size}</Badge>
+                  <span className="font-medium text-sm text-slate-800 dark:text-slate-200 truncate">{v.product_name}</span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <Badge color="slate">Sz {v.size}</Badge>
+                    {selected.has(v.id) && <Check size={14} className="text-emerald-600" />}
+                  </div>
                 </div>
                 <p className="text-xs text-slate-400 mb-1">Color: {v.color}</p>
+                {v.sku && <p className="text-xs text-slate-400 mb-1 font-mono">SKU: {v.sku}</p>}
                 <div className="font-mono text-xs text-slate-600 dark:text-slate-300 bg-slate-50 dark:bg-slate-700 px-2 py-1 rounded">{v.barcode ?? 'No barcode'}</div>
-                <div className="mt-2 h-8 flex items-end gap-px">
-                  {Array.from({ length: 30 }).map((_, i) => <div key={i} style={{ height: `${Math.random() > 0.5 ? 100 : 60}%` }} className="flex-1 bg-slate-800 dark:bg-slate-200" />)}
+                <div className="mt-2 h-8 flex items-end gap-px" aria-hidden="true">
+                  {Array.from({ length: 30 }).map((_, i) => (
+                    <div key={i} style={{ height: `${((i * 7 + 3) % 10) > 4 ? 100 : 60}%` }} className="flex-1 bg-slate-800 dark:bg-slate-200" />
+                  ))}
                 </div>
               </div>
             ))}
           </div>
-        )}
-      </Card>
+          <Pagination page={page} totalPages={totalPages} onPage={setPage} />
+        </Card>
+      )}
     </PageContainer>
   );
 }

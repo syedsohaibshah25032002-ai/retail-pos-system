@@ -19,7 +19,7 @@ import {
   BarcodeLabels, Settings, AuditLogs, Backup, Promotions, DiscountRules, Tax,
 } from './pages/Modules';
 import { useState } from 'react';
-import { Spinner } from './components/ui';
+import { Spinner, ErrorBoundary } from './components/ui';
 
 function Shell() {
   const { session, profile, loading } = useAuth();
@@ -71,20 +71,24 @@ function Shell() {
   };
 
   return (
-    <AppShell current={nav} onNavigate={setNav}>
-      {pages[nav]}
-    </AppShell>
+    <ErrorBoundary>
+      <AppShell current={nav} onNavigate={setNav}>
+        {pages[nav]}
+      </AppShell>
+    </ErrorBoundary>
   );
 }
 
 export default function App() {
   return (
-    <AppProvider>
-      <ToastProvider>
-        <AuthProvider>
-          <Shell />
-        </AuthProvider>
-      </ToastProvider>
-    </AppProvider>
+    <ErrorBoundary>
+      <AppProvider>
+        <ToastProvider>
+          <AuthProvider>
+            <Shell />
+          </AuthProvider>
+        </ToastProvider>
+      </AppProvider>
+    </ErrorBoundary>
   );
 }

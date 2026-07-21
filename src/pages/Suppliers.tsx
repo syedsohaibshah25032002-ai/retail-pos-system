@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
-import { PageContainer, PageHeader, Card, Button, Input, Select, Modal, Badge, Spinner, EmptyState } from '../components/ui';
+import { PageContainer, PageHeader, Card, Button, Input, Select, Modal, Badge, Spinner, EmptyState, ErrorState, ConfirmDialog } from '../components/ui';
 import { formatMoney, formatDate, genReceiptNo } from '../lib/utils';
 import { useToast } from '../lib/toast';
 import { logAudit } from '../lib/audit';
@@ -37,47 +37,63 @@ export function Suppliers() {
   const [pos, setPos] = useState<PO[]>([]);
   const [branches, setBranches] = useState<{ id: string; name: string }[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [editing, setEditing] = useState<Supplier | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [showPO, setShowPO] = useState(false);
   const [showPR, setShowPR] = useState(false);
   const [purchaseReturns, setPurchaseReturns] = useState<any[]>([]);
+  const [confirmDelete, setConfirmDelete] = useState<Supplier | null>(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
-    const [s, p, b, prs] = await Promise.all([
-      supabase.from('suppliers').select('*').order('created_at', { ascending: false }),
-      supabase.from('purchase_orders').select('*').order('created_at', { ascending: false }),
-      supabase.from('branches').select('id,name').order('name'),
-      supabase.from('purchase_returns').select('*,suppliers(name)').order('created_at', { ascending: false }).limit(20),
-    ]);
-    setSuppliers(s.data ?? []);
-    setBranches(b.data ?? []);
-    setPurchaseReturns(prs.data ?? []);
-    const ids = (p.data ?? []).map((x) => x.id);
-    const { data: items } = await supabase.from('purchase_order_items').select('po_id,variant_id,qty,unit_cost,line_total').in('po_id', ids);
-    const vIds = [...new Set((items ?? []).map((i: any) => i.variant_id))];
-    const { data: variants } = await supabase.from('product_variants').select('id,product_id,size').in('id', vIds);
-    const pIds = [...new Set((variants ?? []).map((v: any) => v.product_id))];
-    const { data: products } = await supabase.from('products').select('id,name').in('id', pIds);
-    const pMap = new Map((products ?? []).map((p: any) => [p.id, p.name]));
-    const vMap = new Map((variants ?? []).map((v: any) => [v.id, { name: pMap.get(v.product_id) ?? '?', size: v.size }]));
-    const byPO = new Map<string, any[]>();
-    (items ?? []).forEach((i: any) => {
-      const arr = byPO.get(i.po_id) ?? [];
-      arr.push({ ...i, ...vMap.get(i.variant_id) });
-      byPO.set(i.po_id, arr);
-    });
-    setPos((p.data ?? []).map((x: any) => ({ ...x, items: byPO.get(x.id) ?? [] })));
-    setLoading(false);
-  };
-  useEffect(() => { load(); }, []);
+    setLoadError(null);
+    try {
+      const [s, p, b, prs] = await Promise.all([
+        supabase.from('suppliers').select('*').order('created_at', { ascending: false }),
+        supabase.from('purchase_orders').select('*').order('created_at', { ascending: false }),
+        supabase.from('branches').select('id,name').order('name'),
+        supabase.from('purchase_returns').select('*,suppliers(name)').order('created_at', { ascending: false }).limit(20),
+      ]);
+      if (s.error) throw s.error;
+      setSuppliers(s.data ?? []);
+      setBranches(b.data ?? []);
+      setPurchaseReturns(prs.data ?? []);
+      const ids = (p.data ?? []).map((x) => x.id);
+      const { data: items } = await supabase.from('purchase_order_items').select('po_id,variant_id,qty,unit_cost,line_total').in('po_id', ids);
+      const vIds = [...new Set((items ?? []).map((i: any) => i.variant_id))];
+      const { data: variants } = await supabase.from('product_variants').select('id,product_id,size').in('id', vIds);
+      const pIds = [...new Set((variants ?? []).map((v: any) => v.product_id))];
+      const { data: products } = await supabase.from('products').select('id,name').in('id', pIds);
+      const pMap = new Map((products ?? []).map((p: any) => [p.id, p.name]));
+      const vMap = new Map((variants ?? []).map((v: any) => [v.id, { name: pMap.get(v.product_id) ?? '?', size: v.size }]));
+      const byPO = new Map<string, any[]>();
+      (items ?? []).forEach((i: any) => {
+        const arr = byPO.get(i.po_id) ?? [];
+        arr.push({ ...i, ...vMap.get(i.variant_id) });
+        byPO.set(i.po_id, arr);
+      });
+      setPos((p.data ?? []).map((x: any) => ({ ...x, items: byPO.get(x.id) ?? [] })));
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : 'Failed to load suppliers');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+  useEffect(() => { load(); }, [load]);
 
-  const delSupplier = async (s: Supplier) => {
-    if (!confirm(`Delete supplier ${s.name}?`)) return;
-    await supabase.from('suppliers').delete().eq('id', s.id);
-    success('Supplier deleted');
-    load();
+  const doDelete = async () => {
+    if (!confirmDelete) return;
+    try {
+      const { error: e } = await supabase.from('suppliers').delete().eq('id', confirmDelete.id);
+      if (e) throw e;
+      success(`Supplier "${confirmDelete.name}" deleted`);
+      await logAudit('deleted_supplier', 'suppliers', confirmDelete.id, { name: confirmDelete.name });
+      setConfirmDelete(null);
+      await load();
+    } catch (e) {
+      error(e instanceof Error ? e.message : 'Failed to delete supplier');
+    }
   };
 
   const receivePO = async (po: PO) => {
@@ -119,6 +135,8 @@ export function Suppliers() {
       </div>
       {loading ? (
         <div className="flex justify-center py-12"><Spinner /></div>
+      ) : loadError ? (
+        <Card><ErrorState message={loadError} onRetry={load} /></Card>
       ) : tab === 'suppliers' ? (
         suppliers.length === 0 ? <Card><EmptyState message="No suppliers yet." /></Card> : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -127,8 +145,8 @@ export function Suppliers() {
                 <div className="flex items-start justify-between mb-3">
                   <div className="w-11 h-11 rounded-xl bg-slate-100 flex items-center justify-center"><Truck className="text-slate-600" size={20} /></div>
                   <div className="flex gap-1">
-                    <button onClick={() => { setEditing(s); setShowForm(true); }} className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded"><Edit2 size={15} /></button>
-                    <button onClick={() => delSupplier(s)} className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded"><Trash2 size={15} /></button>
+                    <button onClick={() => { setEditing(s); setShowForm(true); }} aria-label="Edit supplier" className="p-1.5 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 rounded transition-colors"><Edit2 size={15} /></button>
+                    <button onClick={() => setConfirmDelete(s)} aria-label="Delete supplier" className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 rounded transition-colors"><Trash2 size={15} /></button>
                   </div>
                 </div>
                 <h3 className="font-semibold text-slate-900">{s.name}</h3>
@@ -199,6 +217,13 @@ export function Suppliers() {
       {showForm && <SupplierForm editing={editing} onClose={() => setShowForm(false)} onSaved={() => { setShowForm(false); load(); success('Supplier saved'); }} />}
       {showPO && <POForm suppliers={suppliers} branches={branches} onClose={() => setShowPO(false)} onSaved={() => { setShowPO(false); load(); success('Purchase order created'); }} />}
       {showPR && <PurchaseReturnForm suppliers={suppliers} branches={branches} profileId={profile?.id} onClose={() => setShowPR(false)} onSaved={() => { setShowPR(false); load(); success('Purchase return processed'); }} />}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        message={confirmDelete ? `Delete supplier "${confirmDelete.name}"? All associated purchase orders will remain but will show no supplier.` : ''}
+        confirmLabel="Delete"
+        onConfirm={doDelete}
+        onCancel={() => setConfirmDelete(null)}
+      />
     </PageContainer>
   );
 }
@@ -237,6 +262,7 @@ function SupplierForm({ editing, onClose, onSaved }: { editing: Supplier | null;
 }
 
 function POForm({ suppliers, branches, onClose, onSaved }: { suppliers: Supplier[]; branches: { id: string; name: string }[]; onClose: () => void; onSaved: () => void }) {
+  const { error } = useToast();
   const [supplierId, setSupplierId] = useState('');
   const [branchId, setBranchId] = useState('');
   const [note, setNote] = useState('');
@@ -258,17 +284,25 @@ function POForm({ suppliers, branches, onClose, onSaved }: { suppliers: Supplier
   const total = lines.reduce((a, l) => a + l.cost * l.qty, 0);
 
   const save = async () => {
-    if (!supplierId || !branchId) { alert('Select supplier and branch.'); return; }
+    if (!supplierId || !branchId) { error('Select supplier and branch.'); return; }
     const items = lines.filter((l) => l.qty > 0);
-    if (items.length === 0) { alert('Add at least one item.'); return; }
+    if (items.length === 0) { error('Add at least one item to the PO.'); return; }
     setSaving(true);
-    const po_no = genReceiptNo('PO');
-    const { data: po } = await supabase.from('purchase_orders').insert({ po_no, supplier_id: supplierId, branch_id: branchId, status: 'ordered', total, note }).select().single();
-    if (po) {
-      await supabase.from('purchase_order_items').insert(items.map((i) => ({ po_id: po.id, variant_id: i.variant_id, qty: i.qty, unit_cost: i.cost, line_total: i.cost * i.qty })));
+    try {
+      const po_no = genReceiptNo('PO');
+      const { data: po, error: poErr } = await supabase.from('purchase_orders').insert({ po_no, supplier_id: supplierId, branch_id: branchId, status: 'ordered', total, note }).select().single();
+      if (poErr) throw poErr;
+      if (po) {
+        const { error: ie } = await supabase.from('purchase_order_items').insert(items.map((i) => ({ po_id: po.id, variant_id: i.variant_id, qty: i.qty, unit_cost: i.cost, line_total: i.cost * i.qty })));
+        if (ie) throw ie;
+        await logAudit('created_po', 'purchase_orders', po.id, { po_no, total });
+      }
+      onSaved();
+    } catch (e: any) {
+      error(e.message ?? 'Failed to create PO');
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
-    onSaved();
   };
 
   return (

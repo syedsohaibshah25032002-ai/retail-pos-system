@@ -13,6 +13,7 @@ import {
   EmptyState,
   Tabs,
   Tooltip,
+  ConfirmDialog,
 } from '../components/ui';
 import { formatMoney, genBarcode, genBarcodeFromDB, genSKUFromDB, buildReadableSKU, compressImage, debounce } from '../lib/utils';
 import { useToast } from '../lib/toast';
@@ -88,6 +89,9 @@ export function Products() {
   const [bulkItems, setBulkItems] = useState<{ code: string; name: string; size: string }[]>([]);
   const [showScanner, setShowScanner] = useState(false);
   const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
+  const [confirmDelete, setConfirmDelete] = useState<Row | null>(null);
+  const [confirmDeleteBrand, setConfirmDeleteBrand] = useState<{ id: string; name: string } | null>(null);
+  const [confirmDeleteCat, setConfirmDeleteCat] = useState<{ id: string; name: string } | null>(null);
   const fileImportRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
@@ -173,7 +177,6 @@ export function Products() {
   }, [rows, search]);
 
   const del = async (r: Row) => {
-    if (!confirm(`Delete ${r.name}${r.size ? ' (size ' + r.size + ')' : ''}? This will soft-delete the product and hide it from POS. All variants, inventory, barcodes, and price history will be removed.`)) return;
     try {
       await supabase.from('products').update({ deleted_at: new Date().toISOString(), is_active: false }).eq('id', r.product_id);
       await supabase.from('price_history').delete().eq('product_id', r.product_id);
@@ -183,6 +186,7 @@ export function Products() {
       await supabase.rpc('cleanup_orphaned_categories');
       success('Product deleted and hidden from POS');
       await logAudit('deleted_product', 'products', r.product_id, { name: r.name, size: r.size });
+      setConfirmDelete(null);
       await load();
     } catch (e) {
       error(e instanceof Error ? e.message : 'Delete failed');
@@ -273,19 +277,17 @@ export function Products() {
   const delBrand = async (id: string, name: string) => {
     const { count } = await supabase.from('products').select('id', { count: 'exact', head: true }).eq('brand_id', id).is('deleted_at', null);
     if (count && count > 0) { error(`Cannot delete "${name}" — ${count} product(s) still use this brand.`); return; }
-    if (!confirm(`Delete brand "${name}"?`)) return;
     const { error: e } = await supabase.from('brands').delete().eq('id', id);
     if (e) { error(e.message); return; }
-    success('Brand deleted'); await load();
+    success('Brand deleted'); setConfirmDeleteBrand(null); await load();
   };
 
   const delCat = async (id: string, name: string) => {
     const { count } = await supabase.from('products').select('id', { count: 'exact', head: true }).eq('category_id', id).is('deleted_at', null);
     if (count && count > 0) { error(`Cannot delete "${name}" — ${count} product(s) still use this category.`); return; }
-    if (!confirm(`Delete category "${name}"?`)) return;
     const { error: e } = await supabase.from('categories').delete().eq('id', id);
     if (e) { error(e.message); return; }
-    success('Category deleted'); await load();
+    success('Category deleted'); setConfirmDeleteCat(null); await load();
   };
 
   const printBulk = () => {
@@ -370,7 +372,7 @@ export function Products() {
                       </button>
                     </Tooltip>
                     <Tooltip label="Delete">
-                      <button onClick={() => del(r)} className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 rounded">
+                      <button onClick={() => setConfirmDelete(r)} className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 rounded">
                         <Trash2 size={15} />
                       </button>
                     </Tooltip>
@@ -461,7 +463,7 @@ export function Products() {
                           <button onClick={() => { setEditing(r); setShowForm(true); }} title="Edit" className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 dark:hover:bg-slate-700 rounded transition-colors">
                             <Edit2 size={15} />
                           </button>
-                          <button onClick={() => del(r)} title="Delete" className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 rounded transition-colors">
+                          <button onClick={() => setConfirmDelete(r)} title="Delete" className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 rounded transition-colors">
                             <Trash2 size={15} />
                           </button>
                         </div>
@@ -482,8 +484,8 @@ export function Products() {
           categories={categories}
           branches={branches}
           suppliers={suppliers}
-          onDeleteBrand={delBrand}
-          onDeleteCategory={delCat}
+          onRequestDeleteBrand={(id, name) => setConfirmDeleteBrand({ id, name })}
+          onRequestDeleteCategory={(id, name) => setConfirmDeleteCat({ id, name })}
           onClose={() => setShowForm(false)}
           onSaved={() => { setShowForm(false); load(); success('Product saved'); }}
         />
@@ -491,6 +493,27 @@ export function Products() {
       {barcodeItem && <BarcodeModal code={barcodeItem.code} name={barcodeItem.name} onClose={() => setBarcodeItem(null)} />}
       {bulkItems.length > 0 && <BulkBarcodeModal items={bulkItems} onClose={() => setBulkItems([])} />}
       {showScanner && <BarcodeScannerModal onClose={() => setShowScanner(false)} />}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        message={confirmDelete ? `Delete "${confirmDelete.name}"${confirmDelete.size ? ` (size ${confirmDelete.size})` : ''}? This will soft-delete the product and hide it from POS. All variants, inventory, barcodes, and price history will be removed.` : ''}
+        confirmLabel="Delete"
+        onConfirm={() => confirmDelete && del(confirmDelete)}
+        onCancel={() => setConfirmDelete(null)}
+      />
+      <ConfirmDialog
+        open={!!confirmDeleteBrand}
+        message={confirmDeleteBrand ? `Delete brand "${confirmDeleteBrand.name}"? This cannot be undone.` : ''}
+        confirmLabel="Delete"
+        onConfirm={() => confirmDeleteBrand && delBrand(confirmDeleteBrand.id, confirmDeleteBrand.name)}
+        onCancel={() => setConfirmDeleteBrand(null)}
+      />
+      <ConfirmDialog
+        open={!!confirmDeleteCat}
+        message={confirmDeleteCat ? `Delete category "${confirmDeleteCat.name}"? This cannot be undone.` : ''}
+        confirmLabel="Delete"
+        onConfirm={() => confirmDeleteCat && delCat(confirmDeleteCat.id, confirmDeleteCat.name)}
+        onCancel={() => setConfirmDeleteCat(null)}
+      />
     </PageContainer>
   );
 }
@@ -530,8 +553,8 @@ function ProductForm({
   categories,
   branches,
   suppliers,
-  onDeleteBrand,
-  onDeleteCategory,
+  onRequestDeleteBrand,
+  onRequestDeleteCategory,
   onClose,
   onSaved,
 }: {
@@ -540,8 +563,8 @@ function ProductForm({
   categories: { id: string; name: string }[];
   branches: { id: string; name: string; type: string }[];
   suppliers: { id: string; name: string }[];
-  onDeleteBrand: (id: string, name: string) => void;
-  onDeleteCategory: (id: string, name: string) => void;
+  onRequestDeleteBrand: (id: string, name: string) => void;
+  onRequestDeleteCategory: (id: string, name: string) => void;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -862,12 +885,12 @@ function ProductForm({
             <div className="grid grid-cols-2 gap-4">
               <div>
                 <Select label="Brand" value={brandId} onChange={setBrandId} options={[{ value: '', label: '— select —' }, ...brands.map((b) => ({ value: b.id, label: b.name }))]} required />
-                {brandId && <button type="button" onClick={() => { const b = brands.find((x) => x.id === brandId); if (b) onDeleteBrand(b.id, b.name); }} className="text-xs text-red-500 hover:text-red-700 mt-1">Delete this brand</button>}
+                {brandId && <button type="button" onClick={() => { const b = brands.find((x) => x.id === brandId); if (b) onRequestDeleteBrand(b.id, b.name); }} className="text-xs text-red-500 hover:text-red-700 mt-1">Delete this brand</button>}
                 {errs.brand && <p className="text-xs text-red-500 mt-1">{errs.brand}</p>}
               </div>
               <div>
                 <Select label="Category" value={categoryId} onChange={setCategoryId} options={[{ value: '', label: '— select —' }, ...categories.map((c) => ({ value: c.id, label: c.name }))]} required />
-                {categoryId && <button type="button" onClick={() => { const c = categories.find((x) => x.id === categoryId); if (c) onDeleteCategory(c.id, c.name); }} className="text-xs text-red-500 hover:text-red-700 mt-1">Delete this category</button>}
+                {categoryId && <button type="button" onClick={() => { const c = categories.find((x) => x.id === categoryId); if (c) onRequestDeleteCategory(c.id, c.name); }} className="text-xs text-red-500 hover:text-red-700 mt-1">Delete this category</button>}
                 {errs.category && <p className="text-xs text-red-500 mt-1">{errs.category}</p>}
               </div>
             </div>
