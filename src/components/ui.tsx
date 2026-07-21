@@ -121,16 +121,18 @@ export function Select({
   onChange,
   options,
   className = '',
+  required = false,
 }: {
   label?: string;
   value: string;
   onChange: (v: string) => void;
   options: { value: string; label: string }[];
   className?: string;
+  required?: boolean;
 }) {
   return (
     <label className={`block ${className}`}>
-      {label && <span className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">{label}</span>}
+      {label && <span className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">{label}{required && <span className="text-red-500 ml-0.5">*</span>}</span>}
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -229,5 +231,41 @@ export function ConfirmDialog({
         </div>
       </div>
     </div>
+  );
+}
+
+export function Tabs({ tabs, active, onChange }: { tabs: { key: string; label: string; icon?: ReactNode }[]; active: string; onChange: (key: string) => void }) {
+  return (
+    <div className="flex gap-1 border-b border-slate-200 dark:border-slate-700 overflow-x-auto">
+      {tabs.map((t) => (
+        <button
+          key={t.key}
+          onClick={() => onChange(t.key)}
+          className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px whitespace-nowrap transition-colors ${
+            active === t.key
+              ? 'border-emerald-600 text-emerald-700 dark:text-emerald-400'
+              : 'border-transparent text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
+          }`}
+        >
+          {t.icon}
+          {t.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function Skeleton({ className = '' }: { className?: string }) {
+  return <div className={`animate-pulse bg-slate-200 dark:bg-slate-700 rounded ${className}`} />;
+}
+
+export function Tooltip({ children, label }: { children: ReactNode; label: string }) {
+  return (
+    <span className="relative group inline-flex">
+      {children}
+      <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-1 text-xs text-white bg-slate-800 dark:bg-slate-900 rounded opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">
+        {label}
+      </span>
+    </span>
   );
 }

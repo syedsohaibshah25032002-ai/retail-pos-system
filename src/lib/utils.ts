@@ -66,6 +66,74 @@ export async function genSKUFromDB(namePrefix: string): Promise<string> {
   return data as string;
 }
 
+/**
+ * Build a readable SKU in BRAND-COLOR-SIZE format (e.g. NIK-BLK-40).
+ * Checks the database for duplicates and appends a numeric suffix if needed.
+ */
+export async function buildReadableSKU(brand: string | null, color: string | null, size: string | null, name: string | null): Promise<string> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.rpc('build_readable_sku', {
+    brand_name: brand ?? null,
+    color: color ?? null,
+    size: size ?? null,
+    product_name: name ?? null,
+  });
+  if (error || !data) throw new Error('Failed to generate SKU: ' + (error?.message ?? 'no data'));
+  return data as string;
+}
+
+/**
+ * Compress and resize an image file. Returns a data URL.
+ * Max dimension defaults to 600px, quality 0.8.
+ */
+export function compressImage(file: File, maxSize = 600, quality = 0.8): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!file.type.startsWith('image/')) {
+      reject(new Error('Unsupported file format'));
+      return;
+    }
+    const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+    if (!validTypes.includes(file.type)) {
+      reject(new Error('Only JPEG, PNG, WebP, and GIF images are supported'));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > height) {
+          if (width > maxSize) { height = (height * maxSize) / width; width = maxSize; }
+        } else {
+          if (height > maxSize) { width = (width * maxSize) / height; height = maxSize; }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(width);
+        canvas.height = Math.round(height);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) { reject(new Error('Canvas not supported')); return; }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => reject(new Error('Failed to load image'));
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Debounce a function call.
+ */
+export function debounce<T extends (...args: any[]) => void>(fn: T, ms: number): (...args: Parameters<T>) => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return (...args: Parameters<T>) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
 import JsBarcode from 'jsbarcode';
 
 export function drawBarcode(canvas: HTMLCanvasElement, code: string, label?: string) {

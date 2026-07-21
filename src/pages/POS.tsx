@@ -106,6 +106,8 @@ export function POS() {
   const [filterStock, setFilterStock] = useState<'all' | 'instock' | 'low' | 'out'>('all');
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
   const [showRecent, setShowRecent] = useState(false);
+  const [heldSales, setHeldSales] = useState<{ id: string; cart: CartLine[]; discount: string; discountType: 'pct' | 'fixed'; paymentMethod: string; customerId: string }[]>([]);
+  const [suppliers, setSuppliers] = useState<{ id: string; name: string }[]>([]);
 
   const searchRef = useRef<HTMLInputElement>(null);
   const cartEndRef = useRef<HTMLDivElement>(null);
@@ -124,6 +126,8 @@ export function POS() {
       setCustomers(c.data ?? []);
       setCategories(cats.data ?? []);
       setBrands(brs.data ?? []);
+      const { data: supData } = await supabase.from('suppliers').select('id,name').order('name');
+      setSuppliers(supData ?? []);
       const savedBranch = localStorage.getItem('pos-branch');
       if (savedBranch && (b.data ?? []).some((x) => x.id === savedBranch)) {
         setBranchId(savedBranch);
@@ -234,13 +238,35 @@ export function POS() {
     });
   }, []);
 
-  // Keyboard shortcuts
+  // Keyboard shortcuts: F2 Search, F3 Quantity, F4 Customer, F5 Hold Sale, F6 Payment, F7 Discount, F8 Complete, ESC Cancel, Ctrl+Enter Charge
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'F2') { e.preventDefault(); searchRef.current?.focus(); }
+      else if (e.key === 'F3') {
+        e.preventDefault();
+        if (cart.length > 0) {
+          const last = cart[cart.length - 1];
+          const inp = document.querySelector(`input[data-vid="${last.variant_id}"]`) as HTMLInputElement | null;
+          inp?.focus(); inp?.select();
+        }
+      }
       else if (e.key === 'F4') { e.preventDefault(); setShowCustomerDropdown(true); }
+      else if (e.key === 'F5') {
+        e.preventDefault();
+        if (cart.length > 0) {
+          setHeldSales((prev) => [...prev, { id: crypto.randomUUID(), cart, discount, discountType, paymentMethod, customerId }]);
+          setCart([]); setDiscount('0'); setCustomerId('');
+          success('Sale held — retrieve with F5 again');
+        } else if (heldSales.length > 0) {
+          const last = heldSales[heldSales.length - 1];
+          setCart(last.cart); setDiscount(last.discount); setDiscountType(last.discountType); setPaymentMethod(last.paymentMethod); setCustomerId(last.customerId);
+          setHeldSales((prev) => prev.slice(0, -1));
+          success('Held sale restored');
+        }
+      }
       else if (e.key === 'F6') { e.preventDefault(); document.querySelector('button[class*="w-full mt-4"]')?.closest('button')?.focus(); }
-      else if (e.key === 'F8') { e.preventDefault(); document.getElementById('pos-discount-input')?.focus(); }
+      else if (e.key === 'F7') { e.preventDefault(); document.getElementById('pos-discount-input')?.focus(); }
+      else if (e.key === 'F8') { e.preventDefault(); checkout(); }
       else if (e.key === 'Escape') {
         if (receipt) return; // let modal handle
         setShowCustomerDropdown(false);
@@ -253,7 +279,7 @@ export function POS() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [cart, discount, paymentMethod, cashGiven, cardAmount, cardRef, splitCash, splitCard, customerId, branchId, receipt]);
+  }, [cart, discount, paymentMethod, cashGiven, cardAmount, cardRef, splitCash, splitCard, customerId, branchId, receipt, heldSales]);
 
   // Filtered catalog (memoized)
   const filtered = useMemo(() => {
@@ -263,11 +289,13 @@ export function POS() {
         const match =
           c.name.toLowerCase().includes(q) ||
           (c.brand?.toLowerCase().includes(q) ?? false) ||
+          (c.category?.toLowerCase().includes(q) ?? false) ||
           (c.color?.toLowerCase().includes(q) ?? false) ||
           c.size.toLowerCase().includes(q) ||
           (c.sku?.toLowerCase().includes(q) ?? false) ||
           (c.barcode?.includes(q) ?? false) ||
-          (c.product_barcode?.includes(q) ?? false);
+          (c.product_barcode?.includes(q) ?? false) ||
+          (suppliers.some((s) => s.name.toLowerCase().includes(q)) && c.name.toLowerCase().includes(q.split(' ')[0] ?? q));
         if (!match) return false;
       }
       if (filterCategory !== 'all' && c.category !== filterCategory) return false;
@@ -588,7 +616,7 @@ export function POS() {
         date: new Date().toLocaleString('en-PK'),
       });
 
-      // 7. Reset cart
+      // 7. Reset cart + auto-focus search for next customer
       setCart([]);
       setDiscount('0');
       setDiscountType('fixed');
@@ -600,6 +628,7 @@ export function POS() {
       setCustomerId('');
       setCustomerSearch('');
       success(`Sale ${receipt_no} completed`);
+      setTimeout(() => searchRef.current?.focus(), 100);
       await logAudit('completed_sale', 'sales', sale.id, { receipt_no, total, method: paymentMethod });
 
       // 8. Refresh catalog stock locally
@@ -831,6 +860,7 @@ export function POS() {
                       </button>
                       <input
                         value={l.qty}
+                        data-vid={l.variant_id}
                         onChange={(e) => setQty(l.variant_id, parseInt(e.target.value, 10))}
                         className="w-10 text-center text-sm border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 text-slate-900 dark:text-white rounded-md py-1"
                       />
@@ -944,7 +974,7 @@ export function POS() {
             >
               {saving ? <Spinner className="mx-auto" /> : `Charge ${formatMoney(total)}`}
             </Button>
-            <p className="text-[10px] text-slate-400 mt-2 text-center">F2 Search · F4 Customer · F6 Charge · F8 Discount · Ctrl+Enter Complete · Esc Cancel</p>
+            <p className="text-[10px] text-slate-400 mt-2 text-center">F2 Search · F3 Qty · F4 Customer · F5 Hold · F6 Payment · F7 Discount · F8 Complete · Ctrl+Enter Charge · Esc Cancel</p>
           </Card>
         </div>
       </div>
