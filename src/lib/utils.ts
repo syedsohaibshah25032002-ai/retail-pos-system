@@ -40,7 +40,30 @@ export function genReceiptNo(prefix = 'R'): string {
 }
 
 export function genBarcode(): string {
+  // Legacy fallback — should not be used. Use genBarcodeFromDB instead.
   return Math.floor(100000000000 + Math.random() * 900000000000).toString();
+}
+
+/**
+ * Generate a sequential, database-unique barcode by calling the next_barcode() RPC.
+ * Returns 890100000001, 890100000002, etc. Never collides, never reused.
+ */
+export async function genBarcodeFromDB(): Promise<string> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.rpc('next_barcode');
+  if (error || !data) throw new Error('Failed to generate barcode: ' + (error?.message ?? 'no data'));
+  return data as string;
+}
+
+/**
+ * Generate a sequential, database-unique SKU by calling the next_sku() RPC.
+ * Uses a 3-char prefix from the product name. Returns e.g. SHU-000001.
+ */
+export async function genSKUFromDB(namePrefix: string): Promise<string> {
+  const { supabase } = await import('./supabase');
+  const { data, error } = await supabase.rpc('next_sku', { prefix: namePrefix });
+  if (error || !data) throw new Error('Failed to generate SKU: ' + (error?.message ?? 'no data'));
+  return data as string;
 }
 
 import JsBarcode from 'jsbarcode';

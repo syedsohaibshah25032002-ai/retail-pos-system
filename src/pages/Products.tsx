@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback } from 'react';
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import {
   PageContainer,
@@ -12,11 +12,11 @@ import {
   Spinner,
   EmptyState,
 } from '../components/ui';
-import { formatMoney, genBarcode } from '../lib/utils';
+import { formatMoney, genBarcode, genBarcodeFromDB, genSKUFromDB } from '../lib/utils';
 import { useToast } from '../lib/toast';
 import { logAudit } from '../lib/audit';
 import { useAuth } from '../lib/auth';
-import { Plus, Search, Package, CreditCard as Edit2, Trash2, Barcode, Layers, Image as ImageIcon } from 'lucide-react';
+import { Plus, Search, Package, CreditCard as Edit2, Trash2, Barcode, Layers, Image as ImageIcon, Download, Upload, RefreshCw } from 'lucide-react';
 import { BarcodeModal, BulkBarcodeModal } from './products/Barcode';
 import { BarcodeScannerModal } from './products/BarcodeScanner';
 import { ScanLine } from 'lucide-react';
@@ -86,6 +86,7 @@ export function Products() {
   const [barcodeItem, setBarcodeItem] = useState<{ code: string; name: string } | null>(null);
   const [bulkItems, setBulkItems] = useState<{ code: string; name: string; size: string }[]>([]);
   const [showScanner, setShowScanner] = useState(false);
+  const fileImportRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -172,18 +173,100 @@ export function Products() {
   const del = async (r: Row) => {
     if (!confirm(`Delete ${r.name}${r.size ? ' (size ' + r.size + ')' : ''}? This will soft-delete the product and hide it from POS. All variants, inventory, barcodes, and price history will be removed.`)) return;
     try {
-      // Soft-delete the product: mark deleted_at + is_active=false so it disappears from POS
       await supabase.from('products').update({ deleted_at: new Date().toISOString(), is_active: false }).eq('id', r.product_id);
-      // Hard-delete related data: variants (cascades to inventory via FK), price history, images
       await supabase.from('price_history').delete().eq('product_id', r.product_id);
       await supabase.from('product_images').delete().eq('product_id', r.product_id);
       await supabase.from('product_variants').delete().eq('product_id', r.product_id);
+      // Clean up orphaned brands and categories no longer used by any non-deleted product
+      await supabase.rpc('cleanup_orphaned_brands');
+      await supabase.rpc('cleanup_orphaned_categories');
       success('Product deleted and hidden from POS');
       await logAudit('deleted_product', 'products', r.product_id, { name: r.name, size: r.size });
       await load();
     } catch (e) {
       error(e instanceof Error ? e.message : 'Delete failed');
     }
+  };
+
+  const exportCSV = () => {
+    const headers = ['Name', 'Brand', 'Category', 'Gender', 'Color', 'Size', 'SKU', 'Barcode', 'Cost', 'Price', 'Tax%', 'Total Stock', 'Branch Stock', 'Warehouse Stock', 'Status'];
+    const rows = filtered.map((r) => [
+      r.name, r.brand ?? '', r.category ?? '', r.gender ?? '', r.color ?? '', r.size, r.sku ?? '', r.variant_barcode ?? r.barcode ?? '',
+      r.purchase_price, r.selling_price, r.tax_rate, r.total_stock, r.branch_stock, r.warehouse_stock,
+      r.total_stock <= 0 ? 'Out' : r.total_stock <= r.low_stock_threshold ? 'Low' : 'OK',
+    ]);
+    const csv = [headers, ...rows].map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `products-export-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+    success(`Exported ${rows.length} products`);
+  };
+
+  const importCSV = async (file: File) => {
+    const text = await file.text();
+    const lines = text.split('\n').filter((l) => l.trim());
+    if (lines.length < 2) { error('CSV must have a header row and at least one data row'); return; }
+    const parseLine = (line: string): string[] => {
+      const cells: string[] = [];
+      let cur = '';
+      let inQuote = false;
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+        else if (ch === '"') { inQuote = !inQuote; }
+        else if (ch === ',' && !inQuote) { cells.push(cur); cur = ''; }
+        else { cur += ch; }
+      }
+      cells.push(cur);
+      return cells.map((c) => c.trim());
+    };
+    const headers = parseLine(lines[0]).map((h) => h.toLowerCase());
+    const idx = (name: string) => headers.findIndex((h) => h.includes(name));
+    let imported = 0, skipped = 0;
+    for (let i = 1; i < lines.length; i++) {
+      const cols = parseLine(lines[i]);
+      const pName = cols[idx('name')] ?? '';
+      if (!pName) { skipped++; continue; }
+      const barcode = cols[idx('barcode')] ?? '';
+      if (barcode) {
+        const { data: existing } = await supabase.from('product_variants').select('id').eq('barcode', barcode).maybeSingle();
+        if (existing) { skipped++; continue; }
+      }
+      const brandName = cols[idx('brand')] ?? '';
+      const catName = cols[idx('category')] ?? '';
+      let brandId: string | null = null;
+      let catId: string | null = null;
+      if (brandName) {
+        const { data: b } = await supabase.from('brands').select('id').eq('name', brandName).maybeSingle();
+        if (b) brandId = b.id;
+        else { const { data: nb } = await supabase.from('brands').insert({ name: brandName }).select().single(); brandId = nb?.id ?? null; }
+      }
+      if (catName) {
+        const { data: c } = await supabase.from('categories').select('id').eq('name', catName).maybeSingle();
+        if (c) catId = c.id;
+        else { const { data: nc } = await supabase.from('categories').insert({ name: catName }).select().single(); catId = nc?.id ?? null; }
+      }
+      const finalBarcode = barcode || await genBarcodeFromDB();
+      const finalSku = cols[idx('sku')] || await genSKUFromDB(pName);
+      const size = cols[idx('size')] || 'OS';
+      const { data: prod } = await supabase.from('products').insert({
+        name: pName, brand_id: brandId, category_id: catId,
+        purchase_price: Number(cols[idx('cost')]) || 0,
+        selling_price: Number(cols[idx('price')]) || 0,
+        tax_rate: Number(cols[idx('tax')]) || 0,
+        barcode: finalBarcode, is_active: true,
+      }).select().single();
+      if (prod) {
+        await supabase.from('product_variants').insert({ product_id: prod.id, size, barcode: finalBarcode, sku: finalSku });
+        imported++;
+      }
+    }
+    success(`Imported ${imported} products, skipped ${skipped} duplicates`);
+    await load();
   };
 
   const delBrand = async (id: string, name: string) => {
@@ -218,9 +301,12 @@ export function Products() {
         title="Products"
         subtitle="Inventory matrix with barcodes, stock levels, and POS sync"
         action={
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <Button variant="secondary" onClick={() => setShowScanner(true)}><ScanLine size={16} className="inline mr-1" /> Test Barcode</Button>
             <Button variant="secondary" onClick={printBulk}><Layers size={16} className="inline mr-1" /> Bulk Barcodes</Button>
+            <Button variant="secondary" onClick={exportCSV}><Download size={16} className="inline mr-1" /> Export CSV</Button>
+            <Button variant="secondary" onClick={() => fileImportRef.current?.click()}><Upload size={16} className="inline mr-1" /> Import CSV</Button>
+            <input ref={fileImportRef} type="file" accept=".csv" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) importCSV(f); e.target.value = ''; }} />
             <Button onClick={() => { setEditing(null); setShowForm(true); }}><Plus size={16} className="inline mr-1" /> New Product</Button>
           </div>
         }
@@ -255,6 +341,7 @@ export function Products() {
                   <th className="text-left px-4 py-3 font-medium">Barcode</th>
                   <th className="text-right px-4 py-3 font-medium">Cost</th>
                   <th className="text-right px-4 py-3 font-medium">Price</th>
+                  <th className="text-right px-4 py-3 font-medium">Margin</th>
                   <th className="text-right px-4 py-3 font-medium">Branch</th>
                   <th className="text-right px-4 py-3 font-medium">Warehouse</th>
                   <th className="text-right px-4 py-3 font-medium">Total</th>
@@ -288,6 +375,7 @@ export function Products() {
                       <td className="px-4 py-3 text-slate-500 font-mono text-xs">{r.variant_barcode ?? r.barcode ?? '-'}</td>
                       <td className="px-4 py-3 text-right text-slate-600 dark:text-slate-300">{formatMoney(r.purchase_price)}</td>
                       <td className="px-4 py-3 text-right font-medium text-slate-900 dark:text-white">{formatMoney(r.selling_price)}</td>
+                      <td className="px-4 py-3 text-right text-slate-500 dark:text-slate-400">{formatMoney(r.selling_price - r.purchase_price)}</td>
                       <td className="px-4 py-3 text-right text-slate-600 dark:text-slate-300">{r.branch_stock}</td>
                       <td className="px-4 py-3 text-right text-slate-600 dark:text-slate-300">{r.warehouse_stock}</td>
                       <td className="px-4 py-3 text-right font-semibold text-slate-900 dark:text-white">{r.total_stock}</td>
@@ -403,6 +491,7 @@ function ProductForm({
   const [imageUrl, setImageUrl] = useState(editing?.image_url ?? '');
   const [sizes, setSizes] = useState<string[]>(editing?.size ? [editing.size] : ['40']);
   const [stockQty, setStockQty] = useState('0');
+  const [perSizeStock, setPerSizeStock] = useState<Record<string, string>>({});
   const [branchId, setBranchId] = useState(profile?.branch_id ?? '');
   const [warehouseId, setWarehouseId] = useState('');
   const [supplierId, setSupplierId] = useState('');
@@ -422,16 +511,22 @@ function ProductForm({
   const toggleSize = (s: string) =>
     setSizes((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]));
 
-  const genNewBarcode = () => setBarcode(genBarcode());
+  const genNewBarcode = async () => {
+    try { setBarcode(await genBarcodeFromDB()); } catch { /* ignore */ }
+  };
+  const genNewSKU = async () => {
+    try { setSku(await genSKUFromDB(name || 'PRD')); } catch { /* ignore */ }
+  };
 
   function validate(): boolean {
     const e: Record<string, string> = {};
     if (!name.trim()) e.name = 'Name required';
     else if (name.trim().length < 2) e.name = 'Name too short';
+    if (!brandId && !newBrand.trim()) e.brand = 'Brand required';
+    if (!categoryId && !newCat.trim()) e.category = 'Category required';
     if (!editing && sizes.length === 0) e.sizes = 'Select at least one size';
     if (purchase && Number(purchase) < 0) e.purchase = 'Invalid cost';
     if (selling && Number(selling) < 0) e.selling = 'Invalid price';
-    if (!editing && Number(stockQty) < 0) e.stock = 'Invalid stock';
     if (!editing && !branchId) e.branch = 'Select a branch';
     setErrs(e);
     return Object.keys(e).length === 0;
@@ -441,24 +536,42 @@ function ProductForm({
     if (!validate()) return;
     setSaving(true);
     try {
-      // Verify barcode uniqueness before saving
-      const finalBarcode = barcode || genBarcode();
-      const { data: existingP } = await supabase
-        .from('products')
-        .select('id, name')
-        .eq('barcode', finalBarcode)
-        .is('deleted_at', null)
-        .maybeSingle();
-      if (existingP && existingP.id !== (editing?.product_id ?? '')) {
-        throw new Error(`Barcode ${finalBarcode} is already assigned to "${existingP.name}". Generate a new barcode.`);
+      // Generate sequential barcode from DB if empty, verify uniqueness if provided
+      let finalBarcode = barcode;
+      if (!finalBarcode) {
+        finalBarcode = await genBarcodeFromDB();
+      } else {
+        const { data: existingP } = await supabase
+          .from('products')
+          .select('id, name')
+          .eq('barcode', finalBarcode)
+          .is('deleted_at', null)
+          .maybeSingle();
+        if (existingP && existingP.id !== (editing?.product_id ?? '')) {
+          throw new Error(`Barcode ${finalBarcode} is already assigned to "${existingP.name}". Generate a new barcode.`);
+        }
+        const { data: existingV } = await supabase
+          .from('product_variants')
+          .select('id, product_id')
+          .eq('barcode', finalBarcode)
+          .maybeSingle();
+        if (existingV && existingV.id !== (editing?.variant_id ?? '')) {
+          throw new Error(`Barcode ${finalBarcode} is already assigned to another variant. Generate a new barcode.`);
+        }
       }
-      const { data: existingV } = await supabase
-        .from('product_variants')
-        .select('id, products(name)')
-        .eq('barcode', finalBarcode)
-        .maybeSingle();
-      if (existingV && existingV.id !== (editing?.variant_id ?? '')) {
-        throw new Error(`Barcode ${finalBarcode} is already assigned to "${(existingV as any).products?.name ?? 'another variant'}". Generate a new barcode.`);
+      // Auto-generate SKU from DB if empty
+      let finalSku = sku;
+      if (!finalSku) {
+        finalSku = await genSKUFromDB(name);
+      } else {
+        const { data: existingSku } = await supabase
+          .from('product_variants')
+          .select('id')
+          .eq('sku', finalSku)
+          .maybeSingle();
+        if (existingSku && existingSku.id !== (editing?.variant_id ?? '')) {
+          throw new Error(`SKU ${finalSku} is already assigned to another variant. Use a different SKU.`);
+        }
       }
 
       let bId = brandId;
@@ -520,9 +633,10 @@ function ProductForm({
         // update existing variant
         const { error: ve } = await supabase
           .from('product_variants')
-          .update({ size: sizes[0] ?? editing.size, barcode: barcode || genBarcode(), sku: sku || null })
+          .update({ size: sizes[0] ?? editing.size, barcode: finalBarcode, sku: finalSku })
           .eq('id', editing.variant_id);
         if (ve) throw ve;
+        const qty = Number(perSizeStock[sizes[0] ?? editing.size] ?? stockQty) || 0;
         // upsert inventory for selected branch + log movement
         if (branchId && qty > 0) {
           const { data: exInv } = await supabase.from('inventory').select('id,quantity').eq('branch_id', branchId).eq('variant_id', editing.variant_id).maybeSingle();
@@ -536,26 +650,27 @@ function ProductForm({
           }
         }
       } else {
-        // create variants for each selected size
-        const variantRows = sizes.map((s) => ({
-          product_id: productId,
-          size: s,
-          barcode: genBarcode(),
-          sku: sku || null,
-        }));
+        // create variants for each selected size, each with its own barcode and SKU
+        const variantRows: { product_id: string; size: string; barcode: string; sku: string }[] = [];
+        for (const s of sizes) {
+          const vBarcode = await genBarcodeFromDB();
+          const vSku = await genSKUFromDB(name);
+          variantRows.push({ product_id: productId, size: s, barcode: vBarcode, sku: vSku });
+        }
         const { data: newVariants, error: ve } = await supabase.from('product_variants').insert(variantRows).select('id,size');
         if (ve) throw ve;
         // create inventory rows for each variant at selected branch + warehouse + log movements
         const invRows: { branch_id: string; variant_id: string; quantity: number; low_stock_threshold: number }[] = [];
         const movRows: { variant_id: string; branch_id: string; movement_type: string; quantity_change: number; quantity_after: number; note: string; created_by: string | null }[] = [];
         (newVariants ?? []).forEach((v) => {
-          if (branchId) {
-            invRows.push({ branch_id: branchId, variant_id: v.id, quantity: qty, low_stock_threshold: effectiveLow });
-            movRows.push({ variant_id: v.id, branch_id: branchId, movement_type: 'opening', quantity_change: qty, quantity_after: qty, note: 'Opening stock', created_by: profile?.id ?? null });
+          const vQty = Number(perSizeStock[v.size] ?? stockQty) || 0;
+          if (branchId && vQty >= 0) {
+            invRows.push({ branch_id: branchId, variant_id: v.id, quantity: vQty, low_stock_threshold: effectiveLow });
+            movRows.push({ variant_id: v.id, branch_id: branchId, movement_type: 'opening', quantity_change: vQty, quantity_after: vQty, note: 'Opening stock', created_by: profile?.id ?? null });
           }
-          if (warehouseId && warehouseId !== branchId) {
-            invRows.push({ branch_id: warehouseId, variant_id: v.id, quantity: qty, low_stock_threshold: effectiveLow });
-            movRows.push({ variant_id: v.id, branch_id: warehouseId, movement_type: 'opening', quantity_change: qty, quantity_after: qty, note: 'Opening stock (warehouse)', created_by: profile?.id ?? null });
+          if (warehouseId && warehouseId !== branchId && vQty >= 0) {
+            invRows.push({ branch_id: warehouseId, variant_id: v.id, quantity: vQty, low_stock_threshold: effectiveLow });
+            movRows.push({ variant_id: v.id, branch_id: warehouseId, movement_type: 'opening', quantity_change: vQty, quantity_after: vQty, note: 'Opening stock (warehouse)', created_by: profile?.id ?? null });
           }
         });
         if (invRows.length > 0) {
@@ -583,10 +698,12 @@ function ProductForm({
           <div>
             <Select label="Brand" value={brandId} onChange={setBrandId} options={[{ value: '', label: '— select —' }, ...brands.map((b) => ({ value: b.id, label: b.name }))]} />
             {brandId && <button type="button" onClick={() => { const b = brands.find((x) => x.id === brandId); if (b) onDeleteBrand(b.id, b.name); }} className="text-xs text-red-500 hover:text-red-700 mt-1">Delete this brand</button>}
+            {errs.brand && <p className="text-xs text-red-500 mt-1">{errs.brand}</p>}
           </div>
           <div>
             <Select label="Category" value={categoryId} onChange={setCategoryId} options={[{ value: '', label: '— select —' }, ...categories.map((c) => ({ value: c.id, label: c.name }))]} />
             {categoryId && <button type="button" onClick={() => { const c = categories.find((x) => x.id === categoryId); if (c) onDeleteCategory(c.id, c.name); }} className="text-xs text-red-500 hover:text-red-700 mt-1">Delete this category</button>}
+            {errs.category && <p className="text-xs text-red-500 mt-1">{errs.category}</p>}
           </div>
         </div>
         <div className="flex gap-2">
@@ -610,11 +727,17 @@ function ProductForm({
           <div>
             <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">Barcode</label>
             <div className="flex gap-1">
-              <input value={barcode} onChange={(e) => setBarcode(e.target.value)} placeholder="Auto-generated" className="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-white" />
+              <input value={barcode} onChange={(e) => setBarcode(e.target.value)} placeholder="Auto-generated on save" className="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-white" />
               <Button variant="secondary" size="sm" onClick={genNewBarcode}><Barcode size={14} /></Button>
             </div>
           </div>
-          <Input label="SKU" value={sku} onChange={setSku} placeholder="Optional" />
+          <div>
+            <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1.5">SKU</label>
+            <div className="flex gap-1">
+              <input value={sku} onChange={(e) => setSku(e.target.value)} placeholder="Auto-generated on save" className="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-white" />
+              <Button variant="secondary" size="sm" onClick={genNewSKU}><RefreshCw size={14} /></Button>
+            </div>
+          </div>
         </div>
         {!editing && (
           <>
@@ -628,11 +751,24 @@ function ProductForm({
               {errs.sizes && <p className="text-xs text-red-500 mt-1">{errs.sizes}</p>}
             </div>
             <div className="grid grid-cols-2 gap-4">
-              <Input label="Opening Quantity (per size)" value={stockQty} onChange={setStockQty} type="number" error={errs.stock} />
-              <Input label="Max Stock" value={maxStock} onChange={setMaxStock} type="number" />
               <Input label="Reorder Level" value={reorderLevel} onChange={setReorderLevel} type="number" />
               <Input label="Minimum Stock" value={minStock} onChange={setMinStock} type="number" />
+              <Input label="Max Stock" value={maxStock} onChange={setMaxStock} type="number" />
+              <Input label="Default Opening Qty" value={stockQty} onChange={setStockQty} type="number" />
             </div>
+            {sizes.length > 1 && (
+              <div>
+                <span className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Per-Size Opening Stock</span>
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
+                  {sizes.map((s) => (
+                    <div key={s}>
+                      <label className="block text-xs text-slate-500 mb-0.5">Size {s}</label>
+                      <input type="number" min="0" value={perSizeStock[s] ?? stockQty} onChange={(e) => setPerSizeStock((p) => ({ ...p, [s]: e.target.value }))} className="w-full px-2 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm text-center text-slate-900 dark:text-white" />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-4">
               <Select label="Branch (stock location)" value={branchId} onChange={setBranchId} options={[{ value: '', label: '— select —' }, ...shopBranches.map((b) => ({ value: b.id, label: b.name }))]} />
               <Select label="Warehouse (optional)" value={warehouseId} onChange={setWarehouseId} options={[{ value: '', label: '— none —' }, ...warehouseBranches.map((b) => ({ value: b.id, label: b.name }))]} />
