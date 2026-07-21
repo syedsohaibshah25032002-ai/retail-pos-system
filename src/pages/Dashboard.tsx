@@ -184,11 +184,11 @@ export function Dashboard({ onNavigate }: { onNavigate: (k: NavKey) => void }) {
                 <Card className="p-5">
                   <h3 className="font-semibold text-slate-900 dark:text-white mb-3 flex items-center gap-2"><Database size={16} className="text-emerald-500" /> System Status</h3>
                   <div className="space-y-2 text-sm">
-                    <StatusRow icon={Database} label="Database" value={d.systemStatus.database} ok />
-                    <StatusRow icon={Server} label="Server" value={d.systemStatus.server} ok />
-                    <StatusRow icon={Wifi} label="Realtime Sync" value={d.systemStatus.realtime} ok />
-                    <StatusRow icon={Cloud} label="Cloud Backup" value={d.systemStatus.cloudBackup} ok />
-                    <p className="text-xs text-slate-400 pt-1.5 border-t border-slate-100 dark:border-slate-700 mt-1.5">Last Backup: {formatDateTime(d.systemStatus.lastBackup)}</p>
+                    <StatusRow icon={Database} label="Database" value={d.systemStatus.database} ok={d.systemStatus.database === 'Connected'} />
+                    <StatusRow icon={Server} label="Server" value={d.systemStatus.server} ok={d.systemStatus.server === 'Online'} />
+                    <StatusRow icon={Wifi} label="Realtime Sync" value={d.systemStatus.realtime} ok={d.systemStatus.realtime === 'Active'} />
+                    <StatusRow icon={Cloud} label="Cloud Backup" value={d.systemStatus.cloudBackup} ok={d.systemStatus.cloudBackup === 'Completed'} />
+                    <p className="text-xs text-slate-400 pt-1.5 border-t border-slate-100 dark:border-slate-700 mt-1.5">Last Backup: {d.systemStatus.lastBackup || 'No backup'}</p>
                   </div>
                 </Card>
               )}

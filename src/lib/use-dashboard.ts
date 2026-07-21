@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useApp, type DateRangeKey } from '../lib/app-context';
+import { formatDateTime } from './utils';
 
 export type ChartPoint = { label: string; date: string; sales: number; revenue: number; profit: number; transactions: number; aov: number };
 
@@ -520,13 +521,21 @@ export function useDashboardData(): DashboardData {
         { id: 'pa-sup', type: 'Suppliers', label: 'Pending Supplier Payments', count: supplierPending, nav: 'suppliers' },
       ];
 
-      // system status (real connection check)
+      // system status — real checks only
+      const dbConnected = !salesR.error;
+      const serverReachable = dbConnected && !branchesR.error;
+      // realtime: check if any channel is active via presence of recent audit entries (proxy for live connection)
+      const realtimeActive = dbConnected && !auditR.error;
+      // cloud backup: look for a backup-related audit log entry; if none, show 'No backup'
+      const backupLog = (auditR.data ?? []).find((a: any) => String(a.action).toLowerCase().includes('backup'));
+      const lastBackupIso = backupLog?.created_at ?? '';
+      const lastBackupLabel = lastBackupIso ? formatDateTime(lastBackupIso) : 'No backup';
       const systemStatus = {
-        database: salesR.error ? 'Disconnected' : 'Connected',
-        server: 'Online',
-        realtime: 'Active',
-        cloudBackup: 'Completed',
-        lastBackup: new Date(now.getTime() - 2 * 3600000).toISOString(),
+        database: dbConnected ? 'Connected' : 'Disconnected',
+        server: serverReachable ? 'Online' : 'Offline',
+        realtime: realtimeActive ? 'Active' : 'Inactive',
+        cloudBackup: lastBackupIso ? 'Completed' : 'No backup',
+        lastBackup: lastBackupLabel,
       };
 
       setData({
@@ -591,7 +600,7 @@ function emptyData(): Omit<DashboardData, 'loading' | 'error' | 'refresh'> {
     liveSalesFeed: [], smartAlerts: [], aiInsights: [],
     salesTarget: { todayTarget: 0, todaySales: 0, todayPct: 0, monthTarget: 0, monthSales: 0, monthPct: 0 },
     pendingApprovals: [], branchHealth: [],
-    systemStatus: { database: 'Connected', server: 'Online', realtime: 'Active', cloudBackup: 'Completed', lastBackup: '' },
+    systemStatus: { database: 'Connecting…', server: 'Connecting…', realtime: 'Connecting…', cloudBackup: 'No backup', lastBackup: '' },
   };
 }
 
@@ -600,8 +609,13 @@ function dateRangeFor(range: DateRangeKey, customStart: string, customEnd: strin
     case 'today': return { start: new Date(now.getFullYear(), now.getMonth(), now.getDate()), end: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59), label: 'Today' };
     case 'yesterday': return { start: new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1), end: new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59), label: 'Yesterday' };
     case '7days': return { start: new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6), end: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59), label: 'Last 7 Days' };
+    case '30days': return { start: new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29), end: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59), label: 'Last 30 Days' };
     case 'month': return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59), label: 'This Month' };
     case 'lastmonth': return { start: new Date(now.getFullYear(), now.getMonth() - 1, 1), end: new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59), label: 'Last Month' };
+    case 'quarter': {
+      const q = Math.floor(now.getMonth() / 3);
+      return { start: new Date(now.getFullYear(), q * 3, 1), end: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59), label: 'This Quarter' };
+    }
     case 'year': return { start: new Date(now.getFullYear(), 0, 1), end: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59), label: 'This Year' };
     case 'custom': return { start: customStart ? new Date(customStart) : new Date(now.getFullYear(), now.getMonth(), now.getDate()), end: customEnd ? new Date(customEnd + 'T23:59:59') : new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59), label: 'Custom' };
     default: return { start: new Date(now.getFullYear(), now.getMonth(), now.getDate()), end: new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59), label: 'Today' };

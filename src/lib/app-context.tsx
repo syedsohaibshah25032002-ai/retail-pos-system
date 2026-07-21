@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 
-export type DateRangeKey = 'today' | 'yesterday' | '7days' | 'month' | 'lastmonth' | 'year' | 'custom';
+export type DateRangeKey = 'today' | 'yesterday' | '7days' | '30days' | 'month' | 'lastmonth' | 'quarter' | 'year' | 'custom';
 
 export type Filters = {
   dateRange: DateRangeKey;

@@ -76,6 +76,8 @@ export function AppShell({
   const [branches, setBranchs] = useState<{ id: string; name: string }[]>([]);
   const [cashiers, setCashiers] = useState<{ id: string; name: string }[]>([]);
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
+  const [dbStatus, setDbStatus] = useState<'Connected' | 'Disconnected'>('Connected');
+  const [serverStatus, setServerStatus] = useState<'Online' | 'Offline'>('Online');
   const role = profile?.role ?? null;
 
   useEffect(() => {
@@ -88,6 +90,9 @@ export function AppShell({
       setBranchs(b.data ?? []);
       setCashiers(p.data ?? []);
       setCategories(c.data ?? []);
+      const anyError = b.error || p.error || c.error;
+      setDbStatus(anyError ? 'Disconnected' : 'Connected');
+      setServerStatus(anyError ? 'Offline' : 'Online');
     })();
   }, []);
 
@@ -206,8 +211,10 @@ export function AppShell({
                   <option value="today">Today</option>
                   <option value="yesterday">Yesterday</option>
                   <option value="7days">Last 7 Days</option>
+                  <option value="30days">Last 30 Days</option>
                   <option value="month">This Month</option>
                   <option value="lastmonth">Last Month</option>
+                  <option value="quarter">This Quarter</option>
                   <option value="year">This Year</option>
                   <option value="custom">Custom</option>
                 </select>
@@ -346,8 +353,8 @@ export function AppShell({
         <footer className="bg-white dark:bg-slate-800 border-t border-slate-200 dark:border-slate-700 px-4 py-2.5 flex items-center justify-between flex-wrap gap-2 text-xs text-slate-500 dark:text-slate-400">
           <div className="flex items-center gap-4 flex-wrap">
             <span className="flex items-center gap-1"><Zap size={12} className="text-emerald-500" /> SoleERP v2.0</span>
-            <span className="flex items-center gap-1"><DatabaseBackup size={12} className="text-blue-500" /> DB: <span className="text-emerald-600 font-medium">Connected</span></span>
-            <span className="flex items-center gap-1"><Server size={12} className="text-emerald-500" /> Server: <span className="text-emerald-600 font-medium">Online</span></span>
+            <span className="flex items-center gap-1"><DatabaseBackup size={12} className="text-blue-500" /> DB: <span className={dbStatus === 'Connected' ? 'text-emerald-600 font-medium' : 'text-red-500 font-medium'}>{dbStatus}</span></span>
+            <span className="flex items-center gap-1"><Server size={12} className={serverStatus === 'Online' ? 'text-emerald-500' : 'text-red-500'} /> Server: <span className={serverStatus === 'Online' ? 'text-emerald-600 font-medium' : 'text-red-500 font-medium'}>{serverStatus}</span></span>
             <span className="flex items-center gap-1"><Clock size={12} /> Updated: {formatDateTime(lastUpdated)}</span>
           </div>
           <div className="flex items-center gap-1">
