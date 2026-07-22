@@ -5,7 +5,7 @@ import { PageContainer, PageHeader, Card, Button, Input, Select, Modal, Badge, S
 import { formatMoney, formatDateTime, genReceiptNo } from '../lib/utils';
 import { useToast } from '../lib/toast';
 import { logAudit } from '../lib/audit';
-import { Undo2, CheckCircle2, RotateCcw, Search, Calendar, User, Phone, Barcode, Receipt as ReceiptIcon, Filter, ArrowRight, Package } from 'lucide-react';
+import { CheckCircle2, RotateCcw, Search, Calendar, User, Phone, Barcode, Receipt as ReceiptIcon, Filter, ArrowRight, Package } from 'lucide-react';
 import { ReturnReceiptModal, type ReturnReceiptData, type ReturnReceiptLine } from './pos/ReturnReceipt';
 
 const RETURN_REASONS = ['Damaged', 'Wrong Size', 'Wrong Color', 'Customer Changed Mind', 'Other'] as const;
@@ -39,6 +39,7 @@ type SaleItem = {
 type FoundSale = {
   id: string;
   receipt_no: string;
+  invoice_no: string | null;
   branch_id: string;
   total: number;
   subtotal: number;
@@ -81,7 +82,9 @@ type ExchangeItem = {
 
 type SearchMode = 'receipt' | 'barcode' | 'customer' | 'phone' | 'date';
 
-export function Returns() {
+const SALE_SELECT = 'id,receipt_no,invoice_no,branch_id,total,subtotal,tax,discount,status,created_at,customer_id,customer:customers(name,mobile),cashier:profiles(name),branch:branches(name)';
+
+export function Returns({ initialReceipt }: { initialReceipt?: string }) {
   const { profile } = useAuth();
   const { success, error } = useToast();
   const [searchMode, setSearchMode] = useState<SearchMode>('receipt');
@@ -101,6 +104,7 @@ export function Returns() {
   const [filterDateTo, setFilterDateTo] = useState('');
   const [showFilters, setShowFilters] = useState(false);
   const [cashiers, setCashiers] = useState<{ id: string; name: string }[]>([]);
+  const [hasSearched, setHasSearched] = useState(false);
 
   const loadReturns = useCallback(async () => {
     let q = supabase
@@ -111,7 +115,8 @@ export function Returns() {
     if (filterReceipt.trim()) q = q.like('return_no', `%${filterReceipt.trim()}%`);
     if (filterDateFrom) q = q.gte('created_at', `${filterDateFrom}T00:00:00`);
     if (filterDateTo) q = q.lte('created_at', `${filterDateTo}T23:59:59`);
-    const { data } = await q;
+    const { data, error: qErr } = await q;
+    if (qErr) { error(qErr.message); return; }
     let rows = (data ?? []) as any[];
     if (filterCustomer.trim()) {
       rows = rows.filter((r) => (r.customer?.name ?? '').toLowerCase().includes(filterCustomer.trim().toLowerCase()) || (r.customer?.mobile ?? '').includes(filterCustomer.trim()));
@@ -120,7 +125,7 @@ export function Returns() {
       rows = rows.filter((r) => (r.cashier?.name ?? '').toLowerCase().includes(filterCashier.trim().toLowerCase()));
     }
     setReturns(rows as ReturnRecord[]);
-  }, [filterReceipt, filterCustomer, filterCashier, filterDateFrom, filterDateTo]);
+  }, [filterReceipt, filterCustomer, filterCashier, filterDateFrom, filterDateTo, error]);
 
   useEffect(() => {
     loadReturns();
@@ -130,149 +135,188 @@ export function Returns() {
     supabase.from('profiles').select('id,name').order('name').then(({ data }) => setCashiers(data ?? []));
   }, [loadReturns, branchId]);
 
-  const findSales = async () => {
+  // Auto-search if initialReceipt is provided (from POS redirect)
+  useEffect(() => {
+    if (initialReceipt) {
+      setSearchMode('receipt');
+      setSearch(initialReceipt);
+      // Trigger search after a brief delay
+      setTimeout(() => doFindSales('receipt', initialReceipt), 100);
+    }
+  }, [initialReceipt]);
+
+  // Shared function to load full sale details (items, variants, products, returns, stock)
+  const loadSaleDetails = async (salesData: any[]): Promise<FoundSale[]> => {
+    if (salesData.length === 0) return [];
+    const saleIds = salesData.map((s) => s.id);
+    const { data: saleItems, error: siErr } = await supabase
+      .from('sale_items')
+      .select('id,sale_id,variant_id,qty,unit_price,line_total')
+      .in('sale_id', saleIds);
+    if (siErr) throw new Error('Failed to load sale items: ' + siErr.message);
+    const vIds = [...new Set((saleItems ?? []).map((si) => si.variant_id))];
+    const { data: variants, error: vErr } = await supabase
+      .from('product_variants')
+      .select('id,product_id,size,barcode,sku')
+      .in('id', vIds);
+    if (vErr) throw new Error('Failed to load variants: ' + vErr.message);
+    const pIds = [...new Set((variants ?? []).map((v) => v.product_id))];
+    const { data: products, error: pErr } = await supabase
+      .from('products')
+      .select('id,name,color,barcode,image_url')
+      .in('id', pIds);
+    if (pErr) throw new Error('Failed to load products: ' + pErr.message);
+    const pMap = new Map((products ?? []).map((p) => [p.id, p]));
+    const vMap = new Map((variants ?? []).map((v) => [v.id, v]));
+    // Load already-returned quantities per sale_item
+    const siIds = (saleItems ?? []).map((si) => si.id);
+    let returnedMap = new Map<string, number>();
+    if (siIds.length > 0) {
+      const { data: returnItems, error: riErr } = await supabase
+        .from('sales_return_items')
+        .select('sale_item_id,qty')
+        .in('sale_item_id', siIds);
+      if (riErr) throw new Error('Failed to load return items: ' + riErr.message);
+      (returnItems ?? []).forEach((ri) => {
+        returnedMap.set(ri.sale_item_id, (returnedMap.get(ri.sale_item_id) ?? 0) + ri.qty);
+      });
+    }
+    // Load current stock at branch
+    const { data: inv, error: invErr } = await supabase
+      .from('inventory')
+      .select('variant_id,quantity')
+      .eq('branch_id', branchId);
+    if (invErr) throw new Error('Failed to load inventory: ' + invErr.message);
+    const stockMap = new Map((inv ?? []).map((i) => [i.variant_id, i.quantity]));
+    return salesData.map((s: any) => {
+      const items: SaleItem[] = (saleItems ?? []).filter((si) => si.sale_id === s.id).map((si) => {
+        const v = vMap.get(si.variant_id);
+        const p = v ? pMap.get(v.product_id) : null;
+        return {
+          id: si.id, variant_id: si.variant_id, qty: si.qty,
+          unit_price: Number(si.unit_price), line_total: Number(si.line_total),
+          name: p?.name ?? 'Unknown', size: v?.size ?? '?',
+          color: p?.color ?? null, sku: v?.sku ?? null,
+          barcode: v?.barcode ?? null, product_barcode: p?.barcode ?? null,
+          image_url: p?.image_url ?? null,
+          stock: stockMap.get(si.variant_id) ?? 0,
+          alreadyReturned: returnedMap.get(si.id) ?? 0,
+        };
+      });
+      return {
+        ...s, total: Number(s.total), subtotal: Number(s.subtotal),
+        tax: Number(s.tax), discount: Number(s.discount),
+        customer_name: s.customer?.name ?? null,
+        customer_mobile: s.customer?.mobile ?? null,
+        cashier_name: s.cashier?.name ?? null,
+        branch_name: s.branch?.name ?? '',
+        items,
+      };
+    });
+  };
+
+  const doFindSales = useCallback(async (mode: SearchMode, term: string, dateVal?: string) => {
     setLoading(true);
+    setHasSearched(true);
     try {
-      const term = search.trim();
-      if (!term && searchMode !== 'date') { error('Enter a search term'); return; }
       let salesQuery;
-      if (searchMode === 'receipt') {
+      if (mode === 'receipt') {
         salesQuery = supabase
           .from('sales')
-          .select('id,receipt_no,branch_id,total,subtotal,tax,discount,status,created_at,customer_id,customer:customers(name,mobile),cashier:profiles(name),branch:branches(name)')
+          .select(SALE_SELECT)
           .ilike('receipt_no', `%${term}%`)
           .order('created_at', { ascending: false })
           .limit(10);
-      } else if (searchMode === 'date') {
-        if (!searchDate) { error('Select a date'); return; }
+      } else if (mode === 'date') {
+        if (!dateVal) { error('Select a date'); return; }
         salesQuery = supabase
           .from('sales')
-          .select('id,receipt_no,branch_id,total,subtotal,tax,discount,status,created_at,customer_id,customer:customers(name,mobile),cashier:profiles(name),branch:branches(name)')
-          .gte('created_at', `${searchDate}T00:00:00`)
-          .lte('created_at', `${searchDate}T23:59:59`)
+          .select(SALE_SELECT)
+          .gte('created_at', `${dateVal}T00:00:00`)
+          .lte('created_at', `${dateVal}T23:59:59`)
           .order('created_at', { ascending: false })
           .limit(20);
-      } else if (searchMode === 'customer') {
-        const { data: custs } = await supabase
+      } else if (mode === 'customer') {
+        const { data: custs, error: cErr } = await supabase
           .from('customers')
           .select('id')
           .ilike('name', `%${term}%`);
+        if (cErr) throw new Error('Failed to search customers: ' + cErr.message);
         if (!custs || custs.length === 0) { setSearchResults([]); return; }
         salesQuery = supabase
           .from('sales')
-          .select('id,receipt_no,branch_id,total,subtotal,tax,discount,status,created_at,customer_id,customer:customers(name,mobile),cashier:profiles(name),branch:branches(name)')
+          .select(SALE_SELECT)
           .in('customer_id', custs.map((c) => c.id))
           .order('created_at', { ascending: false })
           .limit(20);
-      } else if (searchMode === 'phone') {
-        const { data: custs } = await supabase
+      } else if (mode === 'phone') {
+        const { data: custs, error: cErr } = await supabase
           .from('customers')
           .select('id')
           .ilike('mobile', `%${term}%`);
+        if (cErr) throw new Error('Failed to search customers: ' + cErr.message);
         if (!custs || custs.length === 0) { setSearchResults([]); return; }
         salesQuery = supabase
           .from('sales')
-          .select('id,receipt_no,branch_id,total,subtotal,tax,discount,status,created_at,customer_id,customer:customers(name,mobile),cashier:profiles(name),branch:branches(name)')
+          .select(SALE_SELECT)
           .in('customer_id', custs.map((c) => c.id))
           .order('created_at', { ascending: false })
           .limit(20);
       } else {
-        // barcode
-        const { data: variants } = await supabase
+        // barcode: search sale_items by variant barcode OR product barcode
+        // 1. Find variant IDs matching the barcode directly
+        const { data: variants, error: vErr } = await supabase
           .from('product_variants')
           .select('id')
-          .eq('barcode', term);
-        const { data: products } = await supabase
+          .ilike('barcode', `%${term}%`);
+        if (vErr) throw new Error('Failed to search barcodes: ' + vErr.message);
+        // 2. Find products matching the barcode, then get their variants
+        const { data: products, error: pErr } = await supabase
           .from('products')
           .select('id')
-          .eq('barcode', term);
-        const vIds = (variants ?? []).map((v) => v.id);
+          .ilike('barcode', `%${term}%`);
+        if (pErr) throw new Error('Failed to search product barcodes: ' + pErr.message);
         const pIds = (products ?? []).map((p) => p.id);
-        if (vIds.length === 0 && pIds.length === 0) { setSearchResults([]); return; }
-        let vQuery = supabase.from('product_variants').select('id').in('product_id', pIds);
-        const { data: moreVariants } = pIds.length > 0 ? await vQuery : { data: [] };
-        const allVIds = [...new Set([...vIds, ...(moreVariants ?? []).map((v: any) => v.id)])];
+        let moreVariantIds: string[] = [];
+        if (pIds.length > 0) {
+          const { data: moreVariants, error: mvErr } = await supabase
+            .from('product_variants')
+            .select('id')
+            .in('product_id', pIds);
+          if (mvErr) throw new Error('Failed to search variants: ' + mvErr.message);
+          moreVariantIds = (moreVariants ?? []).map((v) => v.id);
+        }
+        const allVIds = [...new Set([...(variants ?? []).map((v) => v.id), ...moreVariantIds])];
         if (allVIds.length === 0) { setSearchResults([]); return; }
-        const { data: saleItems } = await supabase
+        // 3. Find sale_items containing these variant IDs
+        const { data: saleItems, error: siErr } = await supabase
           .from('sale_items')
-          .select('sale_id,variant_id')
+          .select('sale_id')
           .in('variant_id', allVIds);
+        if (siErr) throw new Error('Failed to search sale items: ' + siErr.message);
         const saleIds = [...new Set((saleItems ?? []).map((si) => si.sale_id))];
         if (saleIds.length === 0) { setSearchResults([]); return; }
         salesQuery = supabase
           .from('sales')
-          .select('id,receipt_no,branch_id,total,subtotal,tax,discount,status,created_at,customer_id,customer:customers(name,mobile),cashier:profiles(name),branch:branches(name)')
+          .select(SALE_SELECT)
           .in('id', saleIds)
           .order('created_at', { ascending: false })
           .limit(20);
       }
-      const { data: salesData } = await salesQuery;
+      const { data: salesData, error: sErr } = await salesQuery;
+      if (sErr) throw new Error('Failed to search sales: ' + sErr.message);
       if (!salesData || salesData.length === 0) { setSearchResults([]); return; }
-      // Load items for each sale
-      const saleIds = salesData.map((s) => s.id);
-      const { data: saleItems } = await supabase
-        .from('sale_items')
-        .select('id,sale_id,variant_id,qty,unit_price,line_total')
-        .in('sale_id', saleIds);
-      const vIds = [...new Set((saleItems ?? []).map((si) => si.variant_id))];
-      const { data: variants } = await supabase
-        .from('product_variants')
-        .select('id,product_id,size,barcode,sku')
-        .in('id', vIds);
-      const pIds = [...new Set((variants ?? []).map((v) => v.product_id))];
-      const { data: products } = await supabase
-        .from('products')
-        .select('id,name,color,barcode,image_url')
-        .in('id', pIds);
-      const pMap = new Map((products ?? []).map((p) => [p.id, p]));
-      const vMap = new Map((variants ?? []).map((v) => [v.id, v]));
-      // Load already-returned quantities per sale_item
-      const { data: returnItems } = await supabase
-        .from('sales_return_items')
-        .select('sale_item_id,qty')
-        .in('sale_item_id', (saleItems ?? []).map((si) => si.id));
-      const returnedMap = new Map<string, number>();
-      (returnItems ?? []).forEach((ri) => {
-        returnedMap.set(ri.sale_item_id, (returnedMap.get(ri.sale_item_id) ?? 0) + ri.qty);
-      });
-      // Load current stock at branch
-      const { data: inv } = await supabase
-        .from('inventory')
-        .select('variant_id,quantity')
-        .eq('branch_id', branchId);
-      const stockMap = new Map((inv ?? []).map((i) => [i.variant_id, i.quantity]));
-      const results: FoundSale[] = salesData.map((s: any) => {
-        const items: SaleItem[] = (saleItems ?? []).filter((si) => si.sale_id === s.id).map((si) => {
-          const v = vMap.get(si.variant_id);
-          const p = v ? pMap.get(v.product_id) : null;
-          return {
-            id: si.id, variant_id: si.variant_id, qty: si.qty,
-            unit_price: Number(si.unit_price), line_total: Number(si.line_total),
-            name: p?.name ?? 'Unknown', size: v?.size ?? '?',
-            color: p?.color ?? null, sku: v?.sku ?? null,
-            barcode: v?.barcode ?? null, product_barcode: p?.barcode ?? null,
-            image_url: p?.image_url ?? null,
-            stock: stockMap.get(si.variant_id) ?? 0,
-            alreadyReturned: returnedMap.get(si.id) ?? 0,
-          };
-        });
-        return {
-          ...s, total: Number(s.total), subtotal: Number(s.subtotal),
-          tax: Number(s.tax), discount: Number(s.discount),
-          customer_name: s.customer?.name ?? null,
-          customer_mobile: s.customer?.mobile ?? null,
-          cashier_name: s.cashier?.name ?? null,
-          branch_name: s.branch?.name ?? '',
-          items,
-        };
-      });
+      const results = await loadSaleDetails(salesData);
       setSearchResults(results);
     } catch (e) {
       error(e instanceof Error ? e.message : 'Search failed');
+      setSearchResults([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, [branchId, error]);
+
+  const findSales = () => doFindSales(searchMode, search.trim(), searchDate);
 
   const openSale = (sale: FoundSale) => {
     setSelectedSale(sale);
@@ -297,7 +341,7 @@ export function Returns() {
             return (
               <button
                 key={m.key}
-                onClick={() => { setSearchMode(m.key); setSearchResults([]); setSearch(''); }}
+                onClick={() => { setSearchMode(m.key); setSearchResults([]); setSearch(''); setHasSearched(false); }}
                 className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
                   searchMode === m.key
                     ? 'bg-slate-900 text-white dark:bg-emerald-600'
@@ -317,7 +361,7 @@ export function Returns() {
               value={search}
               onChange={setSearch}
               placeholder={
-                searchMode === 'receipt' ? 'Enter receipt number (e.g. R-20260101-ABC23)...' :
+                searchMode === 'receipt' ? 'Enter receipt number (e.g. R-20260722-75NNO)...' :
                 searchMode === 'barcode' ? 'Scan or enter barcode...' :
                 searchMode === 'customer' ? 'Customer name...' :
                 'Phone number...'
@@ -343,6 +387,7 @@ export function Returns() {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-medium text-slate-900 dark:text-white">{s.receipt_no}</span>
+                    {s.invoice_no && <span className="text-xs text-slate-400">{s.invoice_no}</span>}
                     <Badge color={s.status === 'completed' ? 'green' : 'amber'}>{s.status}</Badge>
                   </div>
                   <p className="text-xs text-slate-500 dark:text-slate-400">
@@ -362,7 +407,7 @@ export function Returns() {
         </Card>
       )}
 
-      {searchResults.length === 0 && !loading && search && (
+      {searchResults.length === 0 && !loading && hasSearched && (
         <Card className="p-4 mb-4"><EmptyState message="No sales found matching your search." /></Card>
       )}
 
@@ -443,6 +488,7 @@ export function Returns() {
             setSelectedSale(null);
             setSearch('');
             setSearchResults([]);
+            setHasSearched(false);
             setReturnReceipt(receiptData);
             loadReturns();
           }}
@@ -504,24 +550,27 @@ function ProcessReturnModal({
   const searchExchangeItems = async () => {
     const q = exchangeSearch.toLowerCase().trim();
     if (!q) { setExchangeResults([]); return; }
-    const { data: products } = await supabase
+    const { data: products, error: pErr } = await supabase
       .from('products')
-      .select('id,name,color,selling_price,image_url,brands(name)')
+      .select('id,name,color,selling_price,image_url')
       .ilike('name', `%${q}%`)
       .eq('is_active', true)
       .is('deleted_at', null)
       .limit(5);
+    if (pErr) { error(pErr.message); return; }
     const pIds = (products ?? []).map((p) => p.id);
     if (pIds.length === 0) { setExchangeResults([]); return; }
-    const { data: variants } = await supabase
+    const { data: variants, error: vErr } = await supabase
       .from('product_variants')
       .select('id,product_id,size,sku')
       .in('product_id', pIds)
       .order('size');
-    const { data: inv } = await supabase
+    if (vErr) { error(vErr.message); return; }
+    const { data: inv, error: iErr } = await supabase
       .from('inventory')
       .select('variant_id,quantity')
       .eq('branch_id', branchId);
+    if (iErr) { error(iErr.message); return; }
     const stockMap = new Map((inv ?? []).map((i) => [i.variant_id, i.quantity]));
     const pMap = new Map((products ?? []).map((p) => [p.id, p]));
     const items: ExchangeItem[] = (variants ?? []).map((v) => {
@@ -555,7 +604,7 @@ function ProcessReturnModal({
       }).select().single();
       if (re) throw re;
 
-      // Insert return items (with exchange_variant_id if applicable)
+      // Insert return items
       const returnItemsToInsert = items.map((i) => {
         const ex = Object.values(selectedExchanges).find((e) => exchangeQty[e.variant_id]);
         return {
@@ -563,7 +612,8 @@ function ProcessReturnModal({
           exchange_variant_id: exchangeMode ? Object.keys(selectedExchanges)[0] ?? null : null,
         };
       });
-      await supabase.from('sales_return_items').insert(returnItemsToInsert);
+      const { error: riErr } = await supabase.from('sales_return_items').insert(returnItemsToInsert);
+      if (riErr) throw riErr;
 
       // Restock returned items + log movements
       for (const i of items) {
@@ -606,7 +656,7 @@ function ProcessReturnModal({
         }
       }
 
-      // Update customer purchase history (reduce total_spent by refund)
+      // Update customer purchase history
       if (sale.customer_id) {
         const { data: cust } = await supabase.from('customers').select('total_spent,loyalty_points').eq('id', sale.customer_id).maybeSingle();
         if (cust) {
@@ -615,6 +665,15 @@ function ProcessReturnModal({
             loyalty_points: Math.max(0, cust.loyalty_points - Math.floor(finalRefund / 10)),
           }).eq('id', sale.customer_id);
         }
+      }
+
+      // Update sale status
+      const allReturned = sale.items.every((i) => i.alreadyReturned + (returnQty[i.id] ?? 0) >= i.qty);
+      const anyReturned = sale.items.some((i) => (returnQty[i.id] ?? 0) > 0);
+      if (allReturned) {
+        await supabase.from('sales').update({ status: 'returned' }).eq('id', sale.id);
+      } else if (anyReturned) {
+        await supabase.from('sales').update({ status: 'partial' }).eq('id', sale.id);
       }
 
       success(`Return ${return_no} processed — ${formatMoney(finalRefund)} ${exchangeMode ? 'exchange' : refundType}`);
@@ -830,5 +889,3 @@ function ProcessReturnModal({
     </Modal>
   );
 }
-
-

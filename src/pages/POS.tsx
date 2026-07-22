@@ -655,11 +655,14 @@ export function POS({ onNavigate }: { onNavigate: (k: 'returns') => void }) {
     const receipt_no = genReceiptNo();
     const startTime = Date.now();
     try {
+      // 0. Generate invoice number
+      const { data: invNo } = await supabase.rpc('next_invoice_no');
+      const invoice_no = invNo as string;
       // 1. Create sale header
       const { data: sale, error: saleErr } = await supabase
         .from('sales')
         .insert({
-          receipt_no, branch_id: branchId, cashier_id: profile.id,
+          receipt_no, invoice_no, branch_id: branchId, cashier_id: profile.id,
           customer_id: customerId || null, subtotal, discount: totalDiscount, tax, total,
           status: 'completed',
         })

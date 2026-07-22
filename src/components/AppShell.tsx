@@ -16,7 +16,7 @@ type SearchResult = { type: string; id: string; label: string; sub: string; nav:
 
 export type NavKey =
   | 'dashboard' | 'products' | 'pos' | 'branches' | 'transfers' | 'customers'
-  | 'suppliers' | 'expenses' | 'employees' | 'returns' | 'reports'
+  | 'suppliers' | 'expenses' | 'employees' | 'returns' | 'sales_history' | 'reports'
   | 'inventory' | 'warehouse' | 'purchase_orders' | 'accounting' | 'loyalty'
   | 'barcode_labels' | 'settings' | 'audit_logs' | 'backup' | 'promotions'
   | 'discount_rules' | 'tax';
@@ -37,6 +37,7 @@ const NAV: NavItem[] = [
   { key: 'customers', label: 'Customers', icon: Users, roles: ['cashier', 'manager', 'accountant'], group: 'CRM' },
   { key: 'loyalty', label: 'Loyalty Program', icon: Award, roles: ['cashier', 'manager', 'accountant'], group: 'CRM' },
   { key: 'returns', label: 'Sales Returns', icon: Undo2, roles: ['cashier', 'manager'], group: 'Sales' },
+  { key: 'sales_history', label: 'Sales History', icon: ClipboardList, roles: ['cashier', 'manager', 'accountant'], group: 'Sales' },
   { key: 'expenses', label: 'Expenses', icon: Wallet, roles: ['manager', 'accountant'], group: 'Finance' },
   { key: 'accounting', label: 'Accounting', icon: Calculator, roles: ['manager', 'accountant'], group: 'Finance' },
   { key: 'reports', label: 'Reports', icon: BarChart3, roles: ['manager', 'accountant'], group: 'Finance' },

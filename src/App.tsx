@@ -13,6 +13,7 @@ import { Suppliers } from './pages/Suppliers';
 import { Expenses } from './pages/Expenses';
 import { Employees } from './pages/Employees';
 import { Returns } from './pages/Returns';
+import { SalesHistory } from './pages/SalesHistory';
 import { Reports } from './pages/Reports';
 import {
   Inventory, Warehouse, PurchaseOrders, Accounting, Loyalty,
@@ -55,6 +56,7 @@ function Shell() {
     expenses: <Expenses />,
     employees: <Employees />,
     returns: <Returns />,
+    sales_history: <SalesHistory onNavigate={setNav} />,
     reports: <Reports />,
     inventory: <Inventory />,
     warehouse: <Warehouse />,
