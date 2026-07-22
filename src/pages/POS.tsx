@@ -1175,26 +1175,28 @@ export function POS({ onNavigate }: { onNavigate: (k: 'returns') => void }) {
               )}
             </div>
 
-            <button
-              id="pos-charge-btn"
-              onClick={checkout}
-              disabled={saving || cart.length === 0 || !paymentValid || !online}
-              className={`w-full mt-4 rounded-lg font-medium transition-colors inline-flex items-center justify-center gap-1.5 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-1 px-5 py-2.5 text-base ${
-                saving || cart.length === 0 || !paymentValid || !online
-                  ? 'bg-slate-300 dark:bg-slate-700 text-slate-500 cursor-not-allowed'
-                  : 'bg-slate-900 text-white hover:bg-slate-800 dark:bg-emerald-600 dark:hover:bg-emerald-500'
-              }`}
-            >
-              {saving ? <Spinner className="mx-auto" /> : `Charge ${formatMoney(total)}`}
-            </button>
-
-            {/* Return access */}
-            <button
-              onClick={() => onNavigate('returns')}
-              className="w-full mt-2 text-xs text-slate-500 dark:text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-400 inline-flex items-center justify-center gap-1"
-            >
-              <RotateCcw size={12} /> Process Return / Exchange
-            </button>
+            <div className="flex gap-2 mt-4">
+              <button
+                id="pos-charge-btn"
+                onClick={checkout}
+                disabled={saving || cart.length === 0 || !paymentValid || !online}
+                className={`flex-1 rounded-lg font-medium transition-colors inline-flex items-center justify-center gap-1.5 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-1 px-5 py-3 text-base ${
+                  saving || cart.length === 0 || !paymentValid || !online
+                    ? 'bg-slate-300 dark:bg-slate-700 text-slate-500 cursor-not-allowed'
+                    : 'bg-slate-900 text-white hover:bg-slate-800 dark:bg-emerald-600 dark:hover:bg-emerald-500'
+                }`}
+              >
+                {saving ? <Spinner className="mx-auto" /> : `Charge ${formatMoney(total)}`}
+              </button>
+              <button
+                onClick={() => onNavigate('returns')}
+                className="shrink-0 rounded-lg font-semibold transition-colors inline-flex items-center justify-center gap-1.5 focus:outline-none focus:ring-2 focus:ring-amber-500 focus:ring-offset-1 px-4 py-3 text-sm bg-amber-500 text-white hover:bg-amber-600 dark:bg-amber-600 dark:hover:bg-amber-500 shadow-sm"
+                title="Process a return or exchange for a previous sale"
+              >
+                <RotateCcw size={18} />
+                <span className="hidden sm:inline">Return / Exchange</span>
+              </button>
+            </div>
 
             <p className="text-[10px] text-slate-400 mt-2 text-center">
               F2 Search · F3 Qty · F4 Customer · F5 Hold · F6 Pay · F7 Disc · F8 Complete · F9 Shift · Ctrl+Enter Charge · Esc Cancel
