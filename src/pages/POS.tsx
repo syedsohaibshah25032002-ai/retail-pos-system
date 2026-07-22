@@ -97,7 +97,7 @@ const STOCK_FILTERS = [
   { key: 'out', label: 'Out' },
 ] as const;
 
-export function POS() {
+export function POS({ onNavigate }: { onNavigate: (k: 'returns') => void }) {
   const { profile } = useAuth();
   const { success, error, warning } = useToast();
   const [branchId, setBranchId] = useState(profile?.branch_id ?? '');
@@ -140,8 +140,7 @@ export function POS() {
   const [shiftClosingNote, setShiftClosingNote] = useState('');
   const [shiftLoading, setShiftLoading] = useState(false);
   const [online, setOnline] = useState(navigator.onLine);
-  const [showReturnSearch, setShowReturnSearch] = useState(false);
-  const [returnReceiptNo, setReturnReceiptNo] = useState('');
+
 
   const searchRef = useRef<HTMLInputElement>(null);
   const lastScanRef = useRef<{ code: string; time: number }>({ code: '', time: 0 });
@@ -330,7 +329,6 @@ export function POS() {
         setShowFilters(false);
         setShowHeldOrders(false);
         setShowShiftModal(false);
-        setShowReturnSearch(false);
       } else if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
         e.preventDefault();
         checkout();
@@ -1192,7 +1190,7 @@ export function POS() {
 
             {/* Return access */}
             <button
-              onClick={() => setShowReturnSearch(true)}
+              onClick={() => onNavigate('returns')}
               className="w-full mt-2 text-xs text-slate-500 dark:text-slate-400 hover:text-emerald-600 dark:hover:text-emerald-400 inline-flex items-center justify-center gap-1"
             >
               <RotateCcw size={12} /> Process Return / Exchange
@@ -1298,26 +1296,7 @@ export function POS() {
         </Modal>
       )}
 
-      {/* Return Search Modal */}
-      {showReturnSearch && (
-        <Modal open onClose={() => setShowReturnSearch(false)} title="Process Return / Exchange" size="sm">
-          <div className="space-y-3">
-            <p className="text-sm text-slate-500 dark:text-slate-400">Enter a receipt number to process a return or exchange.</p>
-            <Input label="Receipt Number" value={returnReceiptNo} onChange={setReturnReceiptNo} placeholder="R-20260101-ABC23" />
-            <div className="flex justify-end gap-2 pt-2">
-              <Button variant="secondary" onClick={() => setShowReturnSearch(false)}>Cancel</Button>
-              <Button onClick={() => {
-                if (returnReceiptNo.trim()) {
-                  window.location.hash = `#/returns?receipt=${encodeURIComponent(returnReceiptNo.trim())}`;
-                  setShowReturnSearch(false);
-                }
-              }}>
-                <RotateCcw size={16} className="inline mr-1" /> Find Receipt
-              </Button>
-            </div>
-          </div>
-        </Modal>
-      )}
+
     </PageContainer>
   );
 }

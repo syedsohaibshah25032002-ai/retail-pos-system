@@ -47,7 +47,7 @@ function Shell() {
   const pages: Record<NavKey, React.ReactNode> = {
     dashboard: <Dashboard onNavigate={setNav} />,
     products: <Products />,
-    pos: <POS />,
+    pos: <POS onNavigate={setNav} />,
     branches: <Branches />,
     transfers: <Transfers />,
     customers: <Customers />,
