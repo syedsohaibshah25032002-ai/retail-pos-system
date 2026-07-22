@@ -125,11 +125,13 @@ export type SaleItem = {
 export type Payment = {
   id: string;
   sale_id: string;
-  method: 'cash' | 'card' | 'split';
+  method: 'cash' | 'card' | 'split' | 'bank' | 'jazzcash' | 'easypaisa' | 'credit';
   amount: number;
   cash_amount: number;
   card_amount: number;
+  digital_amount: number;
   change_amount: number;
+  reference_no: string | null;
   created_at: string;
 };
 

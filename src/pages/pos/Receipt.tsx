@@ -11,6 +11,7 @@ export type ReceiptLine = {
   sku: string | null;
   price: number;
   qty: number;
+  lineDiscount?: number;
 };
 
 export type ReceiptData = {
@@ -110,8 +111,11 @@ export function ReceiptModal({ receipt, onClose }: { receipt: ReceiptData; onClo
                       {l.color ? `${l.color} · ` : ''}Sz {l.size}{l.sku ? ` · ${l.sku}` : ''}
                     </div>
                     <div className="text-xs">{l.qty} x {formatMoney(l.price)}</div>
+                    {l.lineDiscount && l.lineDiscount > 0 && (
+                      <div className="text-xs text-red-500">Disc: -{formatMoney(l.lineDiscount)}</div>
+                    )}
                   </td>
-                  <td className="r align-top">{formatMoney(l.price * l.qty)}</td>
+                  <td className="r align-top">{formatMoney(l.price * l.qty - (l.lineDiscount ?? 0))}</td>
                 </tr>
               ))}
             </tbody>
